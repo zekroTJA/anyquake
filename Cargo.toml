@@ -1,6 +1,6 @@
 [package]
 name = "anyquake"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Toggle any application window on the current screen with a global hotkey"
 authors = ["Ringo Hoffmann"]
@@ -12,7 +12,12 @@ anyhow = "1"
 auto-launch = "0.6"
 ctrlc = { version = "3", features = ["termination"] }
 dirs = "7"
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
 env_logger = "0.11"
 interprocess = "2"
 log = "0.4"
@@ -21,10 +26,16 @@ shlex = "2"
 toml = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
+ksni = { version = "0.3", default-features = false, features = [
+    "async-io",
+    "blocking",
+] }
 serde_json = "1"
 x11rb = { version = "0.14", features = ["randr"] }
-zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+zbus = { version = "5", default-features = false, features = [
+    "async-io",
+    "blocking-api",
+] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 global-hotkey = "0.10"
@@ -33,13 +44,13 @@ winit = "0.30"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
-  "Win32_Foundation",
-  "Win32_Graphics_Dwm",
-  "Win32_Graphics_Gdi",
-  "Win32_System_Console",
-  "Win32_System_Threading",
-  "Win32_UI_HiDpi",
-  "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -71,20 +82,40 @@ Shows and hides any application window with a global hotkey, quake-console \
 style, on the screen the mouse cursor is on. Supports KDE Plasma (Wayland \
 and X11) and X11 window managers."""
 assets = [
-  ["target/release/anyquake", "usr/bin/", "755"],
-  ["packaging/anyquake.desktop", "usr/share/applications/", "644"],
-  ["packaging/anyquake.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
-  ["README.md", "usr/share/doc/anyquake/", "644"],
-  ["LICENSE", "usr/share/doc/anyquake/", "644"],
+    [
+        "target/release/anyquake",
+        "usr/bin/",
+        "755",
+    ],
+    [
+        "packaging/anyquake.desktop",
+        "usr/share/applications/",
+        "644",
+    ],
+    [
+        "packaging/anyquake.svg",
+        "usr/share/icons/hicolor/scalable/apps/",
+        "644",
+    ],
+    [
+        "README.md",
+        "usr/share/doc/anyquake/",
+        "644",
+    ],
+    [
+        "LICENSE",
+        "usr/share/doc/anyquake/",
+        "644",
+    ],
 ]
 
 [package.metadata.generate-rpm]
 assets = [
-  { source = "target/release/anyquake", dest = "/usr/bin/anyquake", mode = "755" },
-  { source = "packaging/anyquake.desktop", dest = "/usr/share/applications/anyquake.desktop", mode = "644" },
-  { source = "packaging/anyquake.svg", dest = "/usr/share/icons/hicolor/scalable/apps/anyquake.svg", mode = "644" },
-  { source = "README.md", dest = "/usr/share/doc/anyquake/README.md", mode = "644", doc = true },
-  { source = "LICENSE", dest = "/usr/share/licenses/anyquake/LICENSE", mode = "644", doc = true },
+    { source = "target/release/anyquake", dest = "/usr/bin/anyquake", mode = "755" },
+    { source = "packaging/anyquake.desktop", dest = "/usr/share/applications/anyquake.desktop", mode = "644" },
+    { source = "packaging/anyquake.svg", dest = "/usr/share/icons/hicolor/scalable/apps/anyquake.svg", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/anyquake/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/anyquake/LICENSE", mode = "644", doc = true },
 ]
 
 [package.metadata.generate-rpm.requires]
