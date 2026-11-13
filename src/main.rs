@@ -1,6 +1,11 @@
 //! anyquake: show and hide any application window on the current screen
 //! with a global hotkey.
 
+// A GUI application on Windows: no console window opens when it is started
+// from the Start menu or on login. Output of the command line commands goes
+// to the console of the calling shell, see `attach_parent_console`.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod autostart;
 mod config;
 mod controller;
@@ -34,6 +39,8 @@ Environment:
 ";
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    attach_parent_console();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -63,6 +70,16 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Windows GUI programs have no console. When started from a shell, write
+/// output (usage, logs) to that shell's console instead. Redirected output
+/// (pipes, files) works without this.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // Fails when there is no parent console (Start menu, autostart): fine.
+    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
 fn start_daemon(open_settings: bool) -> anyhow::Result<()> {

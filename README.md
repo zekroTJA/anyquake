@@ -72,12 +72,28 @@ of an ad-hoc signed app on every update, so it has to be granted again.
 `packaging/macos/make-icns.py` regenerates the app icon from
 `packaging/anyquake.svg`.
 
+### Windows installer
+
+With [Inno Setup](https://jrsoftware.org/isinfo.php) 6.3 or newer:
+
+```powershell
+cargo build --release
+iscc /DAppVersion=<version> packaging\windows\anyquake.iss   # dist\AnyQuake-<version>-setup.exe
+```
+
+The installer installs for the current user without administrator rights
+(`%LOCALAPPDATA%\Programs\AnyQuake`), or for all users if chosen, and adds a
+Start menu entry. It stops a running AnyQuake before upgrading or
+uninstalling. Uninstalling also removes the autostart entry but keeps the
+configuration. `cargo run --example make-ico` regenerates
+`packaging/windows/anyquake.ico` from the drawing in `src/icon.rs`.
+
 ### Releases
 
 Pushing a tag `v<version>` (matching `version` in `Cargo.toml`) runs
 `.github/workflows/release.yml`: it builds the `.deb` and `.rpm` on Ubuntu
-22.04 and a universal (Apple Silicon + Intel) `.dmg` on macOS, and attaches
-them to a GitHub release.
+22.04, a universal (Apple Silicon + Intel) `.dmg` on macOS and the Windows
+installer, and attaches them to a GitHub release.
 
 ## Usage
 
