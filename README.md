@@ -51,10 +51,33 @@ The packages install the binary, a desktop entry and the icon (from
 `[package.metadata.deb]` and `[package.metadata.generate-rpm]`.
 
 The binary needs a glibc at least as new as the one on the build machine, so
-build release packages on an old distribution. Pushing a tag `v<version>`
-(matching `version` in `Cargo.toml`) does this automatically:
-`.github/workflows/release.yml` builds both packages on Ubuntu 22.04 and
-attaches them to a GitHub release.
+build release packages on an old distribution.
+
+### macOS app
+
+On a Mac:
+
+```sh
+cargo build --release
+packaging/macos/bundle.sh target/release/anyquake dist/   # AnyQuake.app + AnyQuake-<version>.dmg
+```
+
+The app is signed ad-hoc unless `CODESIGN_IDENTITY` names a "Developer ID
+Application" certificate. Ad-hoc signed apps downloaded from the internet are
+blocked by Gatekeeper on first start: open them via System Settings → Privacy
+& Security → *Open Anyway* (or `xattr -dr com.apple.quarantine
+/Applications/AnyQuake.app`). macOS also forgets the Accessibility permission
+of an ad-hoc signed app on every update, so it has to be granted again.
+
+`packaging/macos/make-icns.py` regenerates the app icon from
+`packaging/anyquake.svg`.
+
+### Releases
+
+Pushing a tag `v<version>` (matching `version` in `Cargo.toml`) runs
+`.github/workflows/release.yml`: it builds the `.deb` and `.rpm` on Ubuntu
+22.04 and a universal (Apple Silicon + Intel) `.dmg` on macOS, and attaches
+them to a GitHub release.
 
 ## Usage
 
@@ -111,7 +134,9 @@ always_on_top = true
   animation effect (e.g. Magic Lamp) also applies here.
 - **macOS:** grant AnyQuake the Accessibility permission (System Settings →
   Privacy & Security → Accessibility). macOS doesn't allow keeping other
-  applications' windows on top.
+  applications' windows on top. While AnyQuake is running, open the settings
+  from its menu bar icon: opening the app again in Finder only activates the
+  running instance.
 - **Windows:** hidden windows disappear from the taskbar; shown ones stay
   in it.
 - The identity of the managed window is saved in the cache directory, so a

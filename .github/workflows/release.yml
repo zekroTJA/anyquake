@@ -4,18 +4,11 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
-
 jobs:
-  linux:
-    # The oldest supported runner: the binary only needs the glibc it was
-    # built against, so building on an older one keeps it installable on
-    # older distributions.
-    runs-on: ubuntu-22.04
+  check-version:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Check that the tag matches the Cargo.toml version
         run: |
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
@@ -24,6 +17,14 @@ jobs:
             exit 1
           fi
 
+  linux:
+    needs: check-version
+    # The oldest supported runner: the binary only needs the glibc it was
+    # built against, so building on an older one keeps it installable on
+    # older distributions.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -43,6 +44,60 @@ jobs:
           cargo generate-rpm --output dist/
           ls -l dist
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  macos:
+    needs: check-version
+    # Apple Silicon runner; the x86_64 half of the universal binary is
+    # cross-compiled. `latest` because GitHub retires old macOS images
+    # regularly (macos-14 was removed in November 2026).
+    runs-on: macos-latest
+    env:
+      # LSMinimumSystemVersion in packaging/macos/Info.plist.
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked --release
+
+      - name: Build (universal binary)
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
+          mkdir dist
+          lipo -create -output dist/anyquake \
+            target/aarch64-apple-darwin/release/anyquake \
+            target/x86_64-apple-darwin/release/anyquake
+          lipo -info dist/anyquake
+
+      - name: Package
+        run: |
+          packaging/macos/bundle.sh dist/anyquake dist
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.dmg
+
+  release:
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
