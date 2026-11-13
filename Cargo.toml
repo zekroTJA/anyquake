@@ -3,6 +3,9 @@ name = "anyquake"
 version = "0.1.0"
 edition = "2024"
 description = "Toggle any application window on the current screen with a global hotkey"
+authors = ["Ringo Hoffmann"]
+license = "MIT"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"
@@ -47,3 +50,46 @@ objc2-foundation = "0.3"
 [profile.release]
 lto = true
 strip = true
+
+# Linux packages: `cargo deb` (cargo-deb) and `cargo generate-rpm`
+# (cargo-generate-rpm), both after `cargo build --release`. The settings
+# window loads its graphics and windowing libraries at runtime (dlopen), so
+# the package tools can't detect them and they are listed explicitly.
+
+[package.metadata.deb]
+section = "utils"
+priority = "optional"
+depends = "$auto, libegl1, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libwayland-egl1, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxrandr2"
+extended-description = """\
+Shows and hides any application window with a global hotkey, quake-console \
+style, on the screen the mouse cursor is on. Supports KDE Plasma (Wayland \
+and X11) and X11 window managers."""
+assets = [
+  ["target/release/anyquake", "usr/bin/", "755"],
+  ["packaging/anyquake.desktop", "usr/share/applications/", "644"],
+  ["packaging/anyquake.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+  ["README.md", "usr/share/doc/anyquake/", "644"],
+  ["LICENSE", "usr/share/doc/anyquake/", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+  { source = "target/release/anyquake", dest = "/usr/bin/anyquake", mode = "755" },
+  { source = "packaging/anyquake.desktop", dest = "/usr/share/applications/anyquake.desktop", mode = "644" },
+  { source = "packaging/anyquake.svg", dest = "/usr/share/icons/hicolor/scalable/apps/anyquake.svg", mode = "644" },
+  { source = "README.md", dest = "/usr/share/doc/anyquake/README.md", mode = "644", doc = true },
+  { source = "LICENSE", dest = "/usr/share/licenses/anyquake/LICENSE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+"libEGL.so.1()(64bit)" = "*"
+"libxkbcommon.so.0()(64bit)" = "*"
+"libxkbcommon-x11.so.0()(64bit)" = "*"
+"libwayland-client.so.0()(64bit)" = "*"
+"libwayland-cursor.so.0()(64bit)" = "*"
+"libwayland-egl.so.1()(64bit)" = "*"
+"libX11.so.6()(64bit)" = "*"
+"libX11-xcb.so.1()(64bit)" = "*"
+"libXcursor.so.1()(64bit)" = "*"
+"libXi.so.6()(64bit)" = "*"
+"libXrandr.so.2()(64bit)" = "*"

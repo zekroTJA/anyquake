@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=AnyQuake
+GenericName=Drop-down window toggle
+Comment=Show and hide any application window with a global hotkey
+Exec=anyquake
+Icon=anyquake
+Terminal=false
+Categories=Utility;
+Keywords=quake;dropdown;terminal;hotkey;toggle;
+StartupWMClass=anyquake
+SingleMainWindow=true

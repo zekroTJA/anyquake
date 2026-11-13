@@ -37,6 +37,25 @@ cargo build --release
 ./target/release/anyquake
 ```
 
+### Linux packages
+
+```sh
+cargo install cargo-deb cargo-generate-rpm
+cargo build --release
+cargo deb --no-build --output dist/        # dist/anyquake_<version>-1_amd64.deb
+cargo generate-rpm --output dist/          # dist/anyquake-<version>-1.x86_64.rpm
+```
+
+The packages install the binary, a desktop entry and the icon (from
+`packaging/`). The packaging settings live in `Cargo.toml` under
+`[package.metadata.deb]` and `[package.metadata.generate-rpm]`.
+
+The binary needs a glibc at least as new as the one on the build machine, so
+build release packages on an old distribution. Pushing a tag `v<version>`
+(matching `version` in `Cargo.toml`) does this automatically:
+`.github/workflows/release.yml` builds both packages on Ubuntu 22.04 and
+attaches them to a GitHub release.
+
 ## Usage
 
 ```text
