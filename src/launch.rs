@@ -117,6 +117,14 @@ mod tests {
     fn stems() {
         assert_eq!(program_stem("/usr/bin/Kitty --x"), "kitty");
         assert_eq!(program_stem("konsole"), "konsole");
+        // Double quotes group words on every platform.
+        assert_eq!(program_stem(r#""/opt/My App/app.bin" -a"#), "app.bin");
+    }
+
+    /// Single quotes only group words in POSIX shell quoting.
+    #[cfg(unix)]
+    #[test]
+    fn posix_quotes() {
         assert_eq!(program_stem("'/opt/My App/app.bin' -a"), "app.bin");
     }
 
