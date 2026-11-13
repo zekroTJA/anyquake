@@ -1,0 +1,201 @@
+//! The long running background process: owns the window backend and reacts
+//! to hotkeys, tray actions and IPC commands.
+
+use crate::config::Config;
+use crate::{autostart, launch};
+use anyhow::Result;
+use std::process::Child;
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Something the daemon has to react to.
+/// Receives the outcome of a request (used to report errors back to the
+/// settings window).
+pub type Reply = Sender<Result<(), String>>;
+
+#[derive(Debug, Clone)]
+pub enum Event {
+    /// Show or hide the target window.
+    Toggle,
+    /// Re-read the configuration file.
+    Reload(Option<Reply>),
+    /// Open the settings window.
+    OpenSettings,
+    /// Exit anyquake.
+    Quit,
+    /// A backend asks the daemon to start the target application.
+    Launch,
+    /// The screen layout changed (monitor added/removed, resolution, ...).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    ScreensChanged,
+    /// A backend reports the identity of the managed window (persisted so
+    /// it is found again after a restart).
+    Managed(String),
+}
+
+/// Platform specific window management.
+pub trait Backend {
+    fn name(&self) -> &'static str;
+
+    /// Applies a (new) configuration. Called on startup and on every reload.
+    fn configure(&mut self, config: &Config) -> Result<()>;
+
+    /// Shows or hides the target window.
+    fn toggle(&mut self) -> Result<()>;
+
+    /// Re-applies the placement after the screen layout changed.
+    fn screens_changed(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// If `Some`, [`Backend::tick`] should be called after this delay (used
+    /// to wait for a freshly launched application's window).
+    fn poll_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    fn tick(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called before anyquake exits: give the window back to the user
+    /// (visible in the taskbar again etc.).
+    fn release(&mut self) {}
+}
+
+pub struct Daemon {
+    backend: Box<dyn Backend>,
+    config: Config,
+    /// The settings window process while it is open.
+    settings: Arc<Mutex<Option<Child>>>,
+}
+
+impl Daemon {
+    pub fn new(backend: Box<dyn Backend>) -> Self {
+        log::info!("using backend: {}", backend.name());
+        Self {
+            backend,
+            config: Config::default(),
+            settings: Arc::default(),
+        }
+    }
+
+    /// Loads the configuration and initializes the backend.
+    pub fn start(&mut self, open_settings: bool) {
+        let loaded = match Config::load() {
+            Ok(config) => config,
+            Err(e) => {
+                log::error!("{e:#}; using default configuration");
+                Some(Config::default())
+            }
+        };
+        let first_run = loaded.is_none();
+        self.config = loaded.unwrap_or_default();
+        if let Err(e) = self.backend.configure(&self.config) {
+            log::error!("configuring backend: {e:#}");
+        }
+        if let Err(e) = autostart::sync(self.config.general.autostart) {
+            log::warn!("autostart: {e:#}");
+        }
+        if open_settings || first_run || !self.config.target.is_configured() {
+            self.open_settings();
+        }
+    }
+
+    /// Handles an event. Returns `false` if the daemon should exit.
+    pub fn handle(&mut self, event: Event) -> bool {
+        log::debug!("event: {event:?}");
+        let result = match event {
+            Event::Toggle => {
+                if self.config.target.is_configured() {
+                    self.backend.toggle()
+                } else {
+                    log::warn!("no target application configured");
+                    self.open_settings();
+                    Ok(())
+                }
+            }
+            Event::Reload(reply) => {
+                let result = self.reload();
+                if let Some(reply) = reply {
+                    let _ = reply.send(result.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
+                }
+                result
+            }
+            Event::OpenSettings => {
+                self.open_settings();
+                Ok(())
+            }
+            Event::Launch => launch::spawn_detached(&self.config.target.command),
+            Event::ScreensChanged => self.backend.screens_changed(),
+            Event::Managed(id) => {
+                crate::state::save_managed_window(self.backend.name(), &id);
+                Ok(())
+            }
+            Event::Quit => {
+                self.backend.release();
+                if let Some(mut child) = self.settings.lock().unwrap().take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return false;
+            }
+        };
+        if let Err(e) = result {
+            log::error!("{e:#}");
+        }
+        true
+    }
+
+    pub fn poll_interval(&self) -> Option<Duration> {
+        self.backend.poll_interval()
+    }
+
+    pub fn tick(&mut self) {
+        if let Err(e) = self.backend.tick() {
+            log::error!("{e:#}");
+        }
+    }
+
+    fn reload(&mut self) -> Result<()> {
+        let config = Config::load()?.unwrap_or_default();
+        if config.general.autostart != self.config.general.autostart {
+            autostart::sync(config.general.autostart)?;
+        }
+        self.config = config;
+        self.backend.configure(&self.config)?;
+        log::info!("configuration reloaded");
+        Ok(())
+    }
+
+    fn open_settings(&mut self) {
+        let mut slot = self.settings.lock().unwrap();
+        if slot.is_some() {
+            log::info!("settings window is already open");
+            return;
+        }
+        match launch::spawn_settings() {
+            Ok(child) => *slot = Some(child),
+            Err(e) => {
+                log::error!("{e:#}");
+                return;
+            }
+        }
+        // Reap the process as soon as the window is closed, so it can be
+        // opened again and does not linger as a zombie.
+        let settings = self.settings.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(250));
+                let mut slot = settings.lock().unwrap();
+                match slot.as_mut().map(Child::try_wait) {
+                    Some(Ok(None)) => continue,
+                    Some(_) => *slot = None,
+                    None => {}
+                }
+                break;
+            }
+        });
+    }
+}
