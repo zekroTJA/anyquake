@@ -1,7 +1,7 @@
-# AnyQuake
+![](assets/anyquake-banner.webp)
 
 Show and hide **any** application window with a global hotkey, quake-console
-style, on the screen the mouse cursor is on.
+style!
 
 - One hotkey toggles the configured application. It is started once on the
   first toggle and only hidden and shown afterwards.
@@ -16,12 +16,12 @@ style, on the screen the mouse cursor is on.
 
 ## Platform support
 
-| Platform                       | Backend                          | Status                    |
-| ------------------------------ | -------------------------------- | ------------------------- |
-| Linux: KDE Plasma (Wayland/X11) | KWin script loaded over D-Bus   | tested (Plasma 6.8)       |
-| Linux: X11, any EWMH WM         | X11 / EWMH / RandR, `XGrabKey`  | tested                    |
-| Windows 10/11                   | Win32                           | compiles, untested        |
-| macOS                           | Accessibility API + AppKit      | compiles, untested        |
+| Platform                         | Backend                        | Status                    |
+| -------------------------------- | ------------------------------ | ------------------------- |
+| Linux: KDE Plasma (Wayland/X11)  | KWin script loaded over D-Bus  | tested (Plasma 6.8)       |
+| Linux: X11, any EWMH WM          | X11 / EWMH / RandR, `XGrabKey` | tested                    |
+| Windows 10/11                    | Win32                          | compiles, untested        |
+| macOS                            | Accessibility API + AppKit     | compiles, untested        |
 | Linux: other Wayland compositors | –                              | not supported (see below) |
 
 Wayland does not allow normal applications to grab global keys or to move
@@ -65,7 +65,7 @@ packaging/macos/bundle.sh target/release/anyquake dist/   # AnyQuake.app + AnyQu
 The app is signed ad-hoc unless `CODESIGN_IDENTITY` names a "Developer ID
 Application" certificate. Ad-hoc signed apps downloaded from the internet are
 blocked by Gatekeeper on first start: open them via System Settings → Privacy
-& Security → *Open Anyway* (or `xattr -dr com.apple.quarantine
+& Security → _Open Anyway_ (or `xattr -dr com.apple.quarantine
 /Applications/AnyQuake.app`). macOS also forgets the Accessibility permission
 of an ad-hoc signed app on every update, so it has to be granted again.
 
@@ -156,7 +156,7 @@ always_on_top = true
 ## Notes
 
 - **KDE:** the shortcut appears in System Settings → Keyboard → Shortcuts
-  under *KWin* as "AnyQuake: Toggle window". AnyQuake enforces its configured
+  under _KWin_ as "AnyQuake: Toggle window". AnyQuake enforces its configured
   key on every start. If KDE refuses the key because another shortcut uses
   it, a warning is logged. Hiding uses minimize, so a desktop minimize
   animation effect (e.g. Magic Lamp) also applies here.
