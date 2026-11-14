@@ -7,6 +7,7 @@ pub enum Variant {
     Colored,
     /// The white logo, smaller and with a transparent margin, for the macOS
     /// menu bar (see tools/icons).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     MenuBar,
 }
 

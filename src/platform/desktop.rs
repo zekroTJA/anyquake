@@ -86,12 +86,15 @@ impl App {
         menu.append_items(&[&toggle, &settings, &PredefinedMenuItem::separator(), &quit])?;
         // On macOS the menu bar icon is a white template image, which the
         // system tints to match the other menu bar icons.
-        let builder = if cfg!(target_os = "macos") {
+        #[cfg(target_os = "macos")]
+        let builder = {
             let size = 44;
             let icon =
                 tray_icon::Icon::from_rgba(icon::rgba(size, icon::Variant::MenuBar), size, size)?;
             TrayIconBuilder::new().with_icon_templated(icon)
-        } else {
+        };
+        #[cfg(not(target_os = "macos"))]
+        let builder = {
             let size = 64;
             let icon =
                 tray_icon::Icon::from_rgba(icon::rgba(size, icon::Variant::Colored), size, size)?;
