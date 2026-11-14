@@ -84,10 +84,21 @@ impl App {
         let quit = MenuItem::new("Quit", true, None);
         let menu = Menu::new();
         menu.append_items(&[&toggle, &settings, &PredefinedMenuItem::separator(), &quit])?;
-        let size = 64;
-        let tray = TrayIconBuilder::new()
+        // On macOS the menu bar icon is a white template image, which the
+        // system tints to match the other menu bar icons.
+        let builder = if cfg!(target_os = "macos") {
+            let size = 44;
+            let icon =
+                tray_icon::Icon::from_rgba(icon::rgba(size, icon::Variant::MenuBar), size, size)?;
+            TrayIconBuilder::new().with_icon_templated(icon)
+        } else {
+            let size = 64;
+            let icon =
+                tray_icon::Icon::from_rgba(icon::rgba(size, icon::Variant::Colored), size, size)?;
+            TrayIconBuilder::new().with_icon(icon)
+        };
+        let tray = builder
             .with_tooltip("AnyQuake")
-            .with_icon(tray_icon::Icon::from_rgba(icon::rgba(size), size, size)?)
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(cfg!(target_os = "macos"))
             .build()?;

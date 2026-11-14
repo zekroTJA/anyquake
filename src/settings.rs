@@ -16,7 +16,7 @@ pub fn run() -> Result<()> {
             .with_inner_size([560.0, 640.0])
             .with_min_inner_size([460.0, 420.0])
             .with_icon(egui::IconData {
-                rgba: icon::rgba(icon_size),
+                rgba: icon::rgba(icon_size, icon::Variant::Colored),
                 width: icon_size,
                 height: icon_size,
             }),

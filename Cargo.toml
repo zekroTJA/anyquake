@@ -59,11 +59,6 @@ objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 
-# Regenerates packaging/windows/anyquake.ico (`cargo run --example make-ico`).
-[[example]]
-name = "make-ico"
-path = "packaging/windows/make-ico.rs"
-
 [profile.release]
 lto = true
 strip = true

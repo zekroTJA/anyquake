@@ -79,7 +79,7 @@ impl ksni::Tray for Tray {
             .into_iter()
             .map(|size| {
                 // SNI wants ARGB32 in network byte order.
-                let mut data = icon::rgba(size);
+                let mut data = icon::rgba(size, icon::Variant::Colored);
                 for px in data.as_chunks_mut::<4>().0 {
                     px.rotate_right(1);
                 }

@@ -1,0 +1,13 @@
+# Renders assets/*.svg into the icons the app and the packages use. Not part
+# of the app build; run it with `cargo icons` from the repository root.
+[package]
+name = "anyquake-icons"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone, not a member of the app's (non-existent) workspace.
+[workspace]
+
+[dependencies]
+resvg = "0.50.0"
