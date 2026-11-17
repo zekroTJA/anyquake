@@ -5,6 +5,7 @@ edition = "2024"
 description = "Toggle any application window on the current screen with a global hotkey"
 authors = ["Ringo Hoffmann"]
 license = "MIT"
+repository = "https://github.com/zekroTJA/anyquake"
 readme = "README.md"
 
 [dependencies]
@@ -16,6 +17,7 @@ eframe = { version = "0.37", default-features = false, features = [
     "clipboard",
     "default_fonts",
     "glow",
+    "links",
     "wayland",
     "x11",
 ] }

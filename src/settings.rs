@@ -7,6 +7,8 @@ use crate::{autostart, icon, ipc, launch};
 use anyhow::{Result, anyhow};
 use eframe::egui;
 
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
 pub fn run() -> Result<()> {
     let icon_size = 64;
     let options = eframe::NativeOptions {
@@ -327,6 +329,23 @@ impl eframe::App for SettingsApp {
             self.confirm_close = true;
         }
 
+        egui::Panel::bottom("footer").show(ui, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.weak(concat!("AnyQuake v", env!("CARGO_PKG_VERSION")));
+                ui.weak("·");
+                footer_link(ui, "GitHub", REPOSITORY);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    footer_link(
+                        ui,
+                        "Found a bug or want to suggest an enhancement?",
+                        format!("{REPOSITORY}/issues/new"),
+                    );
+                });
+            });
+            ui.add_space(2.0);
+        });
+
         egui::Panel::bottom("buttons").show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -378,6 +397,14 @@ impl eframe::App for SettingsApp {
 
         self.close_dialog(&ctx);
     }
+}
+
+/// A hyperlink in the regular text color, always underlined.
+fn footer_link(ui: &mut egui::Ui, text: &str, url: impl ToString) {
+    ui.scope(|ui| {
+        ui.visuals_mut().hyperlink_color = ui.visuals().text_color();
+        ui.hyperlink_to(egui::RichText::new(text).underline(), url);
+    });
 }
 
 fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
