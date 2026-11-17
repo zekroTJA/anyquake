@@ -3,12 +3,24 @@
 ;
 ;   iscc /DAppVersion=<version> packaging\windows\anyquake.iss
 ;
-; Writes dist\AnyQuake-<version>-setup.exe. /DBinary=<path> uses another
+; Writes dist\AnyQuake-<version>-<arch>-setup.exe. /DArch=arm64 builds the
+; installer for an ARM64 binary (default: x64). /DBinary=<path> uses another
 ; binary than target\release\anyquake.exe, /O<dir> another output directory.
 ; Relative paths are relative to this file.
 
 #ifndef AppVersion
   #error Pass the version: iscc /DAppVersion=<version>
+#endif
+#ifndef Arch
+  #define Arch "x64"
+#endif
+#if Arch == "x64"
+  ; Also installs on Windows on ARM, where the x64 binary runs emulated.
+  #define ArchAllowed "x64compatible"
+#elif Arch == "arm64"
+  #define ArchAllowed "arm64"
+#else
+  #error Arch must be x64 or arm64
 #endif
 #ifndef Binary
   #define Binary "..\..\target\release\anyquake.exe"
@@ -30,9 +42,8 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 UsedUserAreasWarning=no
-; x64 binary; runs emulated on Windows on ARM.
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#ArchAllowed}
+ArchitecturesInstallIn64BitMode={#ArchAllowed}
 MinVersion=10.0
 SetupIconFile=anyquake.ico
 UninstallDisplayIcon={app}\anyquake.ico
@@ -41,7 +52,7 @@ WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
 OutputDir=..\..\dist
-OutputBaseFilename=AnyQuake-{#AppVersion}-setup
+OutputBaseFilename=AnyQuake-{#AppVersion}-{#Arch}-setup
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

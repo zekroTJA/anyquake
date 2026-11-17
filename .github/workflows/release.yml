@@ -19,10 +19,18 @@ jobs:
 
   linux:
     needs: check-version
-    # The oldest supported runner: the binary only needs the glibc it was
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    # The oldest supported runners: the binary only needs the glibc it was
     # built against, so building on an older one keeps it installable on
-    # older distributions.
-    runs-on: ubuntu-22.04
+    # older distributions. The arm64 build runs natively on an ARM runner, so
+    # cargo-deb and cargo-generate-rpm pick up the architecture by themselves.
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -46,7 +54,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: linux
+          name: linux-${{ matrix.arch }}
           path: dist/*
 
   macos:
@@ -90,17 +98,31 @@ jobs:
 
   windows:
     needs: check-version
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    # Both run on the x64 runner; the ARM64 binary is cross-compiled with the
+    # MSVC ARM64 build tools preinstalled there and can't run its tests.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Test
-        run: cargo test --locked --release
+        if: matrix.arch == 'x64'
+        run: cargo test --locked --release --target ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --locked --release
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
@@ -113,13 +135,15 @@ jobs:
           $iscc = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue |
             Select-Object -First 1
           if (-not $iscc) { throw "ISCC.exe not found" }
-          & $iscc.FullName "/DAppVersion=$version" packaging\windows\anyquake.iss
+          & $iscc.FullName "/DAppVersion=$version" "/DArch=${{ matrix.arch }}" `
+            "/DBinary=$PWD\target\${{ matrix.target }}\release\anyquake.exe" `
+            packaging\windows\anyquake.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-ChildItem dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
+          name: windows-${{ matrix.arch }}
           path: dist/*.exe
 
   release:
