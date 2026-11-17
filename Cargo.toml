@@ -21,9 +21,12 @@ eframe = { version = "0.37", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+# Same version as used by eframe; only needed for its clipboard access.
+egui-winit = { version = "0.37", default-features = false, features = ["clipboard"] }
 env_logger = "0.11"
 interprocess = "2"
 log = "0.4"
+raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 shlex = "2"
 toml = "1"

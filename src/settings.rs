@@ -2,10 +2,12 @@
 
 use crate::config::{Config, MonitorChoice, config_path};
 use crate::geometry::Anchor;
-use crate::hotkey::KEYS;
+use crate::hotkey::{Hotkey, KeyDef, find_key};
 use crate::{autostart, icon, ipc, launch};
 use anyhow::{Result, anyhow};
 use eframe::egui;
+use egui_winit::clipboard::Clipboard;
+use raw_window_handle::HasDisplayHandle;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
@@ -22,12 +24,24 @@ pub fn run() -> Result<()> {
                 width: icon_size,
                 height: icon_size,
             }),
+        // Handled in `raw_input_hook` instead, so that the hotkey input can
+        // record e.g. Ctrl+C.
+        clipboard_shortcuts: false,
         ..Default::default()
     };
     eframe::run_native(
         "AnyQuake",
         options,
-        Box::new(|_cc| Ok(Box::new(SettingsApp::new()))),
+        Box::new(|cc| {
+            let display = cc.display_handle().ok().map(|h| h.as_raw());
+            // SAFETY: the display connection is owned by the event loop,
+            // which outlives the app and thereby the clipboard.
+            let clipboard = unsafe { Clipboard::new(display) };
+            Ok(Box::new(SettingsApp {
+                clipboard: Some(clipboard),
+                ..SettingsApp::new()
+            }))
+        }),
     )
     .map_err(|e| anyhow!("settings window: {e}"))
 }
@@ -53,6 +67,7 @@ struct SettingsApp {
     apps: Vec<apps::DesktopApp>,
     confirm_close: bool,
     allow_close: bool,
+    clipboard: Option<Clipboard>,
 }
 
 impl SettingsApp {
@@ -75,6 +90,7 @@ impl SettingsApp {
             apps: apps::installed(),
             confirm_close: false,
             allow_close: false,
+            clipboard: None,
         }
     }
 
@@ -175,29 +191,19 @@ impl SettingsApp {
         section(ui, "Hotkey", |ui| {
             let hotkey = &mut self.edit.general.hotkey;
             ui.horizontal(|ui| {
-                ui.checkbox(&mut hotkey.ctrl, "Ctrl");
-                ui.checkbox(
-                    &mut hotkey.alt,
-                    if cfg!(target_os = "macos") { "Option" } else { "Alt" },
+                hotkey_input(ui, hotkey).on_hover_text(
+                    "Click and press the desired key combination. \
+                     Escape cancels, clicking again keeps the current hotkey.",
                 );
-                ui.checkbox(&mut hotkey.shift, "Shift");
-                let super_label = match std::env::consts::OS {
-                    "macos" => "Cmd",
-                    "windows" => "Win",
-                    _ => "Super",
-                };
-                ui.checkbox(&mut hotkey.super_key, super_label);
-                ui.label("+");
-                egui::ComboBox::from_id_salt("hotkey-key")
-                    .selected_text(hotkey.key.name)
-                    .height(400.0)
-                    .show_ui(ui, |ui| {
-                        for key in KEYS {
-                            ui.selectable_value(&mut hotkey.key, key, key.name);
-                        }
-                    });
+                // egui only reports the Super key on macOS (as Cmd), so it
+                // can't be recorded elsewhere and gets its own toggle.
+                if !cfg!(target_os = "macos") {
+                    ui.checkbox(&mut hotkey.super_key, SUPER_LABEL)
+                        .on_hover_text(format!(
+                            "The {SUPER_LABEL} key can't be recorded, toggle it here."
+                        ));
+                }
             });
-            ui.weak(format!("Current: {hotkey}"));
         });
     }
 
@@ -322,6 +328,52 @@ impl SettingsApp {
 }
 
 impl eframe::App for SettingsApp {
+    /// Translates clipboard shortcuts into clipboard events (what eframe does
+    /// itself with `clipboard_shortcuts` enabled), unless a hotkey is being
+    /// recorded.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if ctx.data(|d| d.get_temp::<bool>(recording_id()).unwrap_or(false)) {
+            return;
+        }
+        let windows = cfg!(target_os = "windows");
+        for event in &mut raw_input.events {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = *event
+            else {
+                continue;
+            };
+            let command = modifiers.command_only();
+            use egui::Key;
+            *event = if key == Key::Cut
+                || (command && key == Key::X)
+                || (windows && modifiers.shift && key == Key::Delete)
+            {
+                egui::Event::Cut
+            } else if key == Key::Copy
+                || (command && key == Key::C)
+                || (windows && modifiers.ctrl && key == Key::Insert)
+            {
+                egui::Event::Copy
+            } else if key == Key::Paste
+                || (command && key == Key::V)
+                || (windows && modifiers.shift && key == Key::Insert)
+            {
+                match self.clipboard.as_mut().and_then(Clipboard::get) {
+                    Some(text) if !text.is_empty() => {
+                        egui::Event::Paste(text.replace("\r\n", "\n"))
+                    }
+                    _ => continue,
+                }
+            } else {
+                continue;
+            };
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if ctx.input(|i| i.viewport().close_requested()) && self.dirty() && !self.allow_close {
@@ -359,6 +411,7 @@ impl eframe::App for SettingsApp {
                 {
                     *self = Self {
                         status: None,
+                        clipboard: self.clipboard.take(),
                         ..Self::new()
                     };
                 }
@@ -405,6 +458,167 @@ fn footer_link(ui: &mut egui::Ui, text: &str, url: impl ToString) {
         ui.visuals_mut().hyperlink_color = ui.visuals().text_color();
         ui.hyperlink_to(egui::RichText::new(text).underline(), url);
     });
+}
+
+const SUPER_LABEL: &str = match std::env::consts::OS.as_bytes() {
+    b"macos" => "Cmd",
+    b"windows" => "Win",
+    _ => "Super",
+};
+
+/// Where [`hotkey_input`] stores whether it is recording. Also read by
+/// `raw_input_hook` to pass clipboard shortcuts through as plain keys.
+fn recording_id() -> egui::Id {
+    egui::Id::unique("hotkey-recording")
+}
+
+/// An input field that records a hotkey: click it, then press the key
+/// combination. Escape (without modifiers), clicking again or moving the
+/// focus elsewhere cancels the recording.
+fn hotkey_input(ui: &mut egui::Ui, hotkey: &mut Hotkey) -> egui::Response {
+    let size = egui::vec2(200.0, ui.spacing().interact_size.y + 4.0);
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let id = response.id;
+    let mut recording = ui.data(|d| d.get_temp::<bool>(recording_id()).unwrap_or(false));
+
+    let mut handled = false;
+    if recording {
+        // Keep Tab, arrows and Escape from moving the focus away.
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                id,
+                egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                },
+            )
+        });
+        let pressed = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    physical_key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                } => Some((*key, *physical_key, *modifiers)),
+                _ => None,
+            })
+        });
+        if let Some((key, physical_key, modifiers)) = pressed {
+            handled = true;
+            if key == egui::Key::Escape && !modifiers.any() {
+                recording = false;
+            } else if let Some(def) = recorded_key(key, physical_key, modifiers) {
+                hotkey.ctrl = modifiers.ctrl;
+                hotkey.alt = modifiers.alt;
+                hotkey.shift = modifiers.shift;
+                if cfg!(target_os = "macos") {
+                    hotkey.super_key = modifiers.mac_cmd;
+                }
+                hotkey.key = def;
+                recording = false;
+                response.mark_changed();
+            }
+        }
+    }
+    if !handled && response.clicked() {
+        recording = !recording;
+        if recording {
+            response.request_focus();
+        }
+    }
+    if recording && !response.has_focus() {
+        recording = false;
+    }
+    ui.data_mut(|d| d.insert_temp(recording_id(), recording));
+
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let stroke = if recording {
+            visuals.selection.stroke
+        } else {
+            ui.style().interact(&response).bg_stroke
+        };
+        let radius = visuals.widgets.inactive.corner_radius;
+        ui.painter().rect(
+            rect,
+            radius,
+            visuals.text_edit_bg_color(),
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+        let (text, color) = if recording {
+            let held = ui.input(|i| i.modifiers);
+            let mut text = modifier_names(held.ctrl, held.alt, held.shift, held.mac_cmd);
+            text.push_str("Press keys…");
+            (text, visuals.weak_text_color())
+        } else {
+            (hotkey_label(hotkey), visuals.text_color())
+        };
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::TextStyle::Button.resolve(ui.style()),
+            color,
+        );
+    }
+    if recording {
+        ui.ctx().request_repaint();
+    }
+    response
+}
+
+/// Maps a pressed key to a supported hotkey key. The logical key respects
+/// the keyboard layout, but with Shift held it is the shifted symbol (e.g.
+/// `!` instead of `1`), so the physical key is preferred then.
+fn recorded_key(
+    key: egui::Key,
+    physical_key: Option<egui::Key>,
+    modifiers: egui::Modifiers,
+) -> Option<&'static KeyDef> {
+    let map = |key: egui::Key| {
+        find_key(match key {
+            egui::Key::Equals => "Equal",
+            egui::Key::OpenBracket => "BracketLeft",
+            egui::Key::CloseBracket => "BracketRight",
+            other => other.name(),
+        })
+    };
+    let physical = physical_key.and_then(map);
+    if modifiers.shift {
+        physical.or_else(|| map(key))
+    } else {
+        map(key).or(physical)
+    }
+}
+
+fn modifier_names(ctrl: bool, alt: bool, shift: bool, super_key: bool) -> String {
+    let mut text = String::new();
+    if ctrl {
+        text.push_str("Ctrl+");
+    }
+    if alt {
+        text.push_str(if cfg!(target_os = "macos") { "Option+" } else { "Alt+" });
+    }
+    if shift {
+        text.push_str("Shift+");
+    }
+    if super_key {
+        text.push_str(SUPER_LABEL);
+        text.push('+');
+    }
+    text
+}
+
+/// The hotkey with platform specific modifier names.
+fn hotkey_label(hotkey: &Hotkey) -> String {
+    let mut text = modifier_names(hotkey.ctrl, hotkey.alt, hotkey.shift, hotkey.super_key);
+    text.push_str(hotkey.key.name);
+    text
 }
 
 fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
