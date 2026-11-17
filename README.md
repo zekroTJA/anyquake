@@ -19,13 +19,13 @@ style - on _any_[\*](#platform-support) platform!
 
 ## Platform support
 
-| Platform                         | Backend                        | Status                    |
-| -------------------------------- | ------------------------------ | ------------------------- |
-| Linux: KDE Plasma (Wayland/X11)  | KWin script loaded over D-Bus  | tested (Plasma 6.8)       |
-| Linux: X11, any EWMH WM          | X11 / EWMH / RandR, `XGrabKey` | tested                    |
-| Windows 10/11                    | Win32                          | compiles, untested        |
-| macOS                            | Accessibility API + AppKit     | compiles, untested        |
-| Linux: other Wayland compositors | –                              | not supported (see below) |
+| Platform                         | Backend                        | Status                         |
+| -------------------------------- | ------------------------------ | ------------------------------ |
+| Linux: KDE Plasma (Wayland/X11)  | KWin script loaded over D-Bus  | tested (Fedora 44, Plasma 6.8) |
+| Linux: X11, any EWMH WM          | X11 / EWMH / RandR, `XGrabKey` | tested                         |
+| Windows 11                       | Win32                          | tested (26H2)                  |
+| macOS                            | Accessibility API + AppKit     | tested (Tahoe 26.7.4)          |
+| Linux: other Wayland compositors | –                              | not supported (see below)      |
 
 Wayland does not allow normal applications to grab global keys or to move
 other applications' windows. On KDE Plasma, AnyQuake works around this by

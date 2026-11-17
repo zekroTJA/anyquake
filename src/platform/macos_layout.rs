@@ -181,9 +181,14 @@ pub fn resolve(key: &KeyDef, positional: Code) -> Option<Code> {
 /// Used when recording hotkeys: with Option or Shift held the logical key
 /// is a different character (`Option+Y` types `¥`), so only the physical
 /// key is usable. Non-character keys are returned as they are. Returns
-/// `None` if no supported key would be registered on this physical key
-/// again (e.g. `ß` on German, whose US name `Minus` is the `-` key there).
-pub fn layout_key(positional: &'static KeyDef) -> Option<&'static KeyDef> {
+/// `Some(None)` if no supported key would be registered on this physical
+/// key again (e.g. `ß` on German, whose US name `Minus` is the `-` key
+/// there). Always `Some`, the outer `Option` matches the other platforms.
+pub fn layout_key(positional: &'static KeyDef) -> Option<Option<&'static KeyDef>> {
+    Some(layout_key_inner(positional))
+}
+
+fn layout_key_inner(positional: &'static KeyDef) -> Option<&'static KeyDef> {
     let code = Code::from_str(positional.code).ok()?;
     let Some(&(_, key_code)) = CHARACTER_KEYS.iter().find(|(c, _)| *c == code) else {
         return Some(positional);

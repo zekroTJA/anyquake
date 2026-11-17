@@ -20,6 +20,11 @@ mod macos_layout;
 #[cfg(target_os = "macos")]
 pub use macos_layout::layout_key;
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+mod layout;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub use layout::layout_key;
+
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub fn run_daemon(_open_settings: bool) -> anyhow::Result<()> {
     anyhow::bail!("this platform is not supported")

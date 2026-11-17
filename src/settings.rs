@@ -573,11 +573,14 @@ fn hotkey_input(ui: &mut egui::Ui, hotkey: &mut Hotkey) -> egui::Response {
 }
 
 /// Maps a pressed key to a supported hotkey key. The logical key respects
-/// the keyboard layout, but with Shift held it is the shifted symbol (e.g.
-/// `!` instead of `1`), so the physical key is preferred then. On macOS
-/// Option changes the character as well (`Option+Y` is `¥`) and the
-/// physical key (US layout position) is translated with the current layout
-/// instead.
+/// the keyboard layout, but modifiers change it: Shift gives the shifted
+/// symbol (`!` instead of `1`), macOS Option another character (`Option+Y`
+/// is `¥`) and with Alt on Windows (or as level 3 key on Linux) there is
+/// none and egui falls back to the physical key, named by its US layout
+/// position (`Alt+Y` would be `Alt+Z` on a German keyboard). So the physical
+/// key is translated with the current layout instead (see
+/// `platform::layout_key`). Only if the layout is unknown the logical key is
+/// used, or the physical key with Shift held.
 fn recorded_key(
     key: egui::Key,
     physical_key: Option<egui::Key>,
@@ -592,9 +595,9 @@ fn recorded_key(
         })
     };
     let physical = physical_key.and_then(map);
-    #[cfg(target_os = "macos")]
-    if let Some(physical) = physical {
-        return crate::platform::layout_key(physical);
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    if let Some(key) = physical.and_then(crate::platform::layout_key) {
+        return key;
     }
     if modifiers.shift {
         physical.or_else(|| map(key))
