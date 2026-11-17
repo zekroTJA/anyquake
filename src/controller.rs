@@ -53,6 +53,10 @@ pub trait WindowOps {
         Ok(())
     }
 
+    /// Called on every controller tick, i.e. every [`SCREEN_POLL`] if
+    /// [`WindowOps::POLL_SCREENS`] is set.
+    fn poll(&mut self) {}
+
     /// All windows matching `matcher` (lower case class / exe / bundle id).
     fn find_all(&mut self, matcher: &str) -> Result<Vec<Self::Window>>;
 
@@ -293,6 +297,7 @@ impl<O: WindowOps> Backend for Controller<O> {
     }
 
     fn tick(&mut self) -> Result<()> {
+        self.ops.poll();
         let Some(pending) = &self.pending else {
             if O::POLL_SCREENS {
                 let monitors = Some(self.ops.monitors()?);

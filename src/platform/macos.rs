@@ -228,6 +228,11 @@ impl WindowOps for MacOS {
         self.hotkey.set(&config.general.hotkey)
     }
 
+    /// Follow keyboard layout switches (Carbon hotkeys use physical keys).
+    fn poll(&mut self) {
+        self.hotkey.refresh();
+    }
+
     fn find_all(&mut self, matcher: &str) -> Result<Vec<i32>> {
         let apps = NSWorkspace::sharedWorkspace().runningApplications();
         Ok(apps

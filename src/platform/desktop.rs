@@ -29,39 +29,88 @@ enum UserEvent {
 /// so registration errors are reported back to the settings window.
 pub struct HotkeyRegistration {
     manager: GlobalHotKeyManager,
-    current: Option<HotKey>,
+    /// The configured hotkey.
+    configured: Option<Hotkey>,
+    /// The native hotkey last tried to register and whether that worked.
+    attempted: Option<(HotKey, bool)>,
 }
 
 impl HotkeyRegistration {
     pub fn new() -> Result<Self> {
         Ok(Self {
             manager: GlobalHotKeyManager::new().context("initializing global hotkeys")?,
-            current: None,
+            configured: None,
+            attempted: None,
         })
     }
 
     pub fn set(&mut self, hotkey: &Hotkey) -> Result<()> {
-        let mut mods = Modifiers::empty();
-        mods.set(Modifiers::CONTROL, hotkey.ctrl);
-        mods.set(Modifiers::ALT, hotkey.alt);
-        mods.set(Modifiers::SHIFT, hotkey.shift);
-        mods.set(Modifiers::META, hotkey.super_key);
-        let code = Code::from_str(hotkey.key.code)
-            .map_err(|_| anyhow::anyhow!("unsupported key {}", hotkey.key.name))?;
-        let new = HotKey::new(Some(mods), code);
-        if self.current == Some(new) {
+        self.configured = Some(hotkey.clone());
+        let new = native(hotkey, true)?;
+        if self.attempted == Some((new, true)) {
             return Ok(());
         }
-        if let Some(old) = self.current.take() {
+        self.register(hotkey, new)
+    }
+
+    /// Registers the hotkey again if the physical key typing it changed
+    /// (keyboard layout switched). Called periodically.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn refresh(&mut self) {
+        let Some(hotkey) = self.configured.clone() else {
+            return;
+        };
+        let Ok(new) = native(&hotkey, false) else {
+            return;
+        };
+        // Don't retry (and warn) every time if the same key failed before.
+        if self.attempted.is_some_and(|(old, _)| old == new) {
+            return;
+        }
+        log::info!("keyboard layout changed, registering {hotkey} again");
+        if let Err(e) = self.register(&hotkey, new) {
+            log::warn!("{e:#}");
+        }
+    }
+
+    fn register(&mut self, hotkey: &Hotkey, new: HotKey) -> Result<()> {
+        if let Some((old, true)) = self.attempted.take() {
             let _ = self.manager.unregister(old);
         }
-        self.manager.register(new).with_context(|| {
+        let result = self.manager.register(new).with_context(|| {
             format!("could not register {hotkey}, it is probably used by another application")
-        })?;
-        self.current = Some(new);
-        log::info!("registered hotkey {hotkey}");
+        });
+        self.attempted = Some((new, result.is_ok()));
+        result?;
+        log::info!("registered hotkey {hotkey} ({})", new.key);
         Ok(())
     }
+}
+
+/// The native hotkey for `hotkey`. On macOS the physical key is chosen by
+/// the current keyboard layout (see [`super::macos_layout`]).
+fn native(hotkey: &Hotkey, warn: bool) -> Result<HotKey> {
+    let mut mods = Modifiers::empty();
+    mods.set(Modifiers::CONTROL, hotkey.ctrl);
+    mods.set(Modifiers::ALT, hotkey.alt);
+    mods.set(Modifiers::SHIFT, hotkey.shift);
+    mods.set(Modifiers::META, hotkey.super_key);
+    let code = Code::from_str(hotkey.key.code)
+        .map_err(|_| anyhow::anyhow!("unsupported key {}", hotkey.key.name))?;
+    #[cfg(target_os = "macos")]
+    let code = super::macos_layout::resolve(hotkey.key, code).unwrap_or_else(|| {
+        if warn {
+            log::warn!(
+                "no key types '{}' without modifiers in the current keyboard layout, using the \
+                 key at its position on a US keyboard",
+                hotkey.key.name
+            );
+        }
+        code
+    });
+    #[cfg(not(target_os = "macos"))]
+    let _ = warn;
+    Ok(HotKey::new(Some(mods), code))
 }
 
 struct MenuIds {

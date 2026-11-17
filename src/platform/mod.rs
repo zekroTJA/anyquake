@@ -15,6 +15,10 @@ mod windows;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod macos_layout;
+#[cfg(target_os = "macos")]
+pub use macos_layout::layout_key;
 
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub fn run_daemon(_open_settings: bool) -> anyhow::Result<()> {
