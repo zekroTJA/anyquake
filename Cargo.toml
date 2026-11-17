@@ -1,6 +1,6 @@
 [package]
 name = "anyquake"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Toggle any application window on the current screen with a global hotkey"
 authors = ["Ringo Hoffmann"]
@@ -22,7 +22,9 @@ eframe = { version = "0.37", default-features = false, features = [
     "x11",
 ] }
 # Same version as used by eframe; only needed for its clipboard access.
-egui-winit = { version = "0.37", default-features = false, features = ["clipboard"] }
+egui-winit = { version = "0.37", default-features = false, features = [
+    "clipboard",
+] }
 env_logger = "0.11"
 interprocess = "2"
 log = "0.4"
