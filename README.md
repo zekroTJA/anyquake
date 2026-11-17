@@ -1,7 +1,10 @@
 ![](assets/anyquake-banner.webp)
 
-Show and hide **any** application window with a global hotkey, quake-console
-style!
+Show and hide **any** application window with a global hotkey - quake-console
+style - on _any_[\*](#platform-support) platform!
+
+> [!IMPORTANT]
+> This project is mostly vibe coded, but code changes are reviewed and tested by a human (me). Also the logo is 100% human made.
 
 - One hotkey toggles the configured application. It is started once on the
   first toggle and only hidden and shown afterwards.
