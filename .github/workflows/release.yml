@@ -152,6 +152,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Only for the macOS installation notice.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -159,4 +163,6 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          # GitHub puts the body in front of the generated release notes.
+          body_path: .github/release-notes-macos.md
           generate_release_notes: true

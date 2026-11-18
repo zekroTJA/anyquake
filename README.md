@@ -40,6 +40,23 @@ GNOME it installs a small GNOME Shell extension that does the same (see
 compositor integration. `ANYQUAKE_BACKEND=x11` can manage XWayland windows
 only. `ANYQUAKE_BACKEND=kwin|gnome|x11` overrides the automatic detection.
 
+## Installation
+
+On macOS and Linux, install or update to the latest release with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/zekroTJA/anyquake/main/install.sh | bash
+```
+
+On Linux it installs the `.deb` (apt) or `.rpm` (dnf, zypper, yum) package
+for your architecture. On macOS it installs `AnyQuake.app` into
+`/Applications`, resets the outdated Accessibility permission when updating
+and opens the Accessibility settings, where AnyQuake has to be added (again)
+with **+**. Set `ANYQUAKE_VERSION=<version>` to install a specific release.
+
+Alternatively, download the package or installer from the
+[releases](https://github.com/zekroTJA/anyquake/releases) page.
+
 ## Building
 
 ```sh
