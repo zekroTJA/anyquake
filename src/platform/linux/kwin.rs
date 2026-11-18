@@ -15,8 +15,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
-use zbus::blocking::{Connection, connection};
-use zbus::interface;
+use zbus::blocking::Connection;
 
 const NAME: &str = "KWin";
 const SCRIPT_NAME: &str = "anyquake";
@@ -27,27 +26,6 @@ const SHORTCUT_TEXT: &str = "AnyQuake: Toggle window";
 const RELEASE_SHORTCUT: &str = "anyquake-release";
 const RELEASE_SHORTCUT_TEXT: &str = "AnyQuake: Release window (internal)";
 
-const DBUS_NAME: &str = "de.anyquake.Daemon";
-const DBUS_PATH: &str = "/de/anyquake/Daemon";
-
-/// D-Bus object the KWin script calls into.
-struct ScriptCallbacks {
-    events: Sender<Event>,
-}
-
-#[interface(name = "de.anyquake.Daemon")]
-impl ScriptCallbacks {
-    /// The script found no window and asks us to start the application.
-    fn launch(&self) {
-        let _ = self.events.send(Event::Launch);
-    }
-
-    /// The script reports the internal id of the window it manages.
-    fn set_managed(&self, id: String) {
-        let _ = self.events.send(Event::Managed(id));
-    }
-}
-
 pub struct KWin {
     conn: Connection,
     script_path: PathBuf,
@@ -55,11 +33,7 @@ pub struct KWin {
 
 impl KWin {
     pub fn new(events: Sender<Event>) -> Result<Self> {
-        let conn = connection::Builder::session()?
-            .name(DBUS_NAME)?
-            .serve_at(DBUS_PATH, ScriptCallbacks { events })?
-            .build()
-            .context("connecting to the D-Bus session bus")?;
+        let conn = super::session_connection(events)?;
         let script_path = dirs::cache_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join(APP_NAME)

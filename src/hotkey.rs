@@ -217,6 +217,53 @@ impl Hotkey {
         parts.push(key);
         parts.join("+")
     }
+
+    /// GTK accelerator string as used by mutter / GNOME Shell, e.g.
+    /// `<Control><Alt>t`. Keys are X keysym names.
+    pub fn gtk_accelerator(&self) -> String {
+        let mut accel = String::new();
+        if self.ctrl {
+            accel.push_str("<Control>");
+        }
+        if self.alt {
+            accel.push_str("<Alt>");
+        }
+        if self.shift {
+            accel.push_str("<Shift>");
+        }
+        if self.super_key {
+            accel.push_str("<Super>");
+        }
+        let key = match self.key.name {
+            "Backtick" => "grave",
+            "Space" => "space",
+            "Enter" => "Return",
+            "Backspace" => "BackSpace",
+            "PageUp" => "Page_Up",
+            "PageDown" => "Page_Down",
+            "ScrollLock" => "Scroll_Lock",
+            "PrintScreen" => "Print",
+            "Minus" => "minus",
+            "Equal" => "equal",
+            "Comma" => "comma",
+            "Period" => "period",
+            "Slash" => "slash",
+            "Backslash" => "backslash",
+            "Semicolon" => "semicolon",
+            "Quote" => "apostrophe",
+            "BracketLeft" => "bracketleft",
+            "BracketRight" => "bracketright",
+            // Letters are lowercase keysyms; F-keys, digits, arrows and the
+            // remaining named keys already use their keysym name.
+            name if name.len() == 1 => {
+                accel.push_str(&name.to_ascii_lowercase());
+                return accel;
+            }
+            name => name,
+        };
+        accel.push_str(key);
+        accel
+    }
 }
 
 impl fmt::Display for Hotkey {
@@ -304,6 +351,17 @@ mod tests {
     fn qt_combination() {
         let h: Hotkey = "Meta+F12".parse().unwrap();
         assert_eq!(h.qt_combination(), 0x1000_0000 | 0x0100_003b);
+    }
+
+    #[test]
+    fn gtk_accelerator() {
+        let accel = |s: &str| s.parse::<Hotkey>().unwrap().gtk_accelerator();
+        assert_eq!(accel("Ctrl+Alt+T"), "<Control><Alt>t");
+        assert_eq!(accel("Super+Backtick"), "<Super>grave");
+        assert_eq!(accel("Shift+PageDown"), "<Shift>Page_Down");
+        assert_eq!(accel("F12"), "F12");
+        assert_eq!(accel("Ctrl+1"), "<Control>1");
+        assert_eq!(accel("Escape"), "Escape");
     }
 
     #[test]

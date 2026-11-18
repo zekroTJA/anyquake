@@ -22,6 +22,7 @@ style - on _any_[\*](#platform-support) platform!
 | Platform                         | Backend                        | Status                         |
 | -------------------------------- | ------------------------------ | ------------------------------ |
 | Linux: KDE Plasma (Wayland/X11)  | KWin script loaded over D-Bus  | tested (Fedora 44, Plasma 6.8) |
+| Linux: GNOME (Wayland)           | GNOME Shell extension, D-Bus   | tested (GNOME 50, headless)    |
 | Linux: X11, any EWMH WM          | X11 / EWMH / RandR, `XGrabKey` | tested                         |
 | Windows 11                       | Win32                          | tested (26H2)                  |
 | macOS                            | Accessibility API + AppKit     | tested (Tahoe 26.7.4)          |
@@ -29,9 +30,11 @@ style - on _any_[\*](#platform-support) platform!
 
 Wayland does not allow normal applications to grab global keys or to move
 other applications' windows. On KDE Plasma, AnyQuake works around this by
-loading a KWin script that owns the shortcut and positions the window. GNOME,
-Sway, Hyprland and others would each need their own compositor integration.
-`ANYQUAKE_BACKEND=x11` can manage XWayland windows only.
+loading a KWin script that owns the shortcut and positions the window. On
+GNOME it installs a small GNOME Shell extension that does the same (see
+[Notes](#notes)). Sway, Hyprland and others would each need their own
+compositor integration. `ANYQUAKE_BACKEND=x11` can manage XWayland windows
+only. `ANYQUAKE_BACKEND=kwin|gnome|x11` overrides the automatic detection.
 
 ## Building
 
@@ -45,8 +48,8 @@ cargo build --release
 ```sh
 cargo install cargo-deb cargo-generate-rpm
 cargo build --release
-cargo deb --no-build --output dist/        # dist/anyquake_<version>-1_amd64.deb
-cargo generate-rpm --output dist/          # dist/anyquake-<version>-1.x86_64.rpm
+cargo deb --no-build --output dist/
+cargo generate-rpm --output dist/anyquake.rpm
 ```
 
 The packages install the binary, a desktop entry and the icon (from
@@ -164,6 +167,18 @@ always_on_top = true
   key on every start. If KDE refuses the key because another shortcut uses
   it, a warning is logged. Hiding uses minimize, so a desktop minimize
   animation effect (e.g. Magic Lamp) also applies here.
+- **GNOME (Wayland):** on its first start, AnyQuake installs its GNOME Shell
+  extension to `~/.local/share/gnome-shell/extensions/anyquake@zekrotja.github.io`
+  and enables it. GNOME Shell only picks up new extensions at login, so **log
+  out and back in once** (a notification reminds you); the same applies after
+  an update of AnyQuake that changes the extension. The extension needs GNOME
+  45 or newer and is configured by AnyQuake over D-Bus, so changing settings
+  never needs a re-login. If GNOME refuses the hotkey because another shortcut
+  uses it, saving the settings shows an error. GNOME does not let the
+  extension hide the window from Alt+Tab and the overview, and normal windows
+  can't cover the top bar, even with "Don't cover panels" turned off. GNOME
+  has no tray by default: start AnyQuake again (or `anyquake settings`) to
+  open the settings, or install the AppIndicator extension.
 - **macOS:** grant AnyQuake the Accessibility permission (System Settings →
   Privacy & Security → Accessibility). macOS doesn't allow keeping other
   applications' windows on top. While AnyQuake is running, open the settings

@@ -1,31 +1,72 @@
-//! Linux: KWin (KDE Plasma, Wayland and X11) or plain X11 backend,
-//! StatusNotifierItem tray icon, channel based main loop.
+//! Linux: KWin (KDE Plasma, Wayland and X11), GNOME Shell (Wayland) or
+//! plain X11 backend, StatusNotifierItem tray icon, channel based main loop.
 
+mod gnome;
 mod kwin;
 mod x11;
 
 use crate::controller::Controller;
 use crate::daemon::{Backend, Daemon, Event};
 use crate::{icon, ipc};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use ksni::blocking::TrayMethods;
 use ksni::menu::StandardItem;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
+use zbus::blocking::{Connection, connection};
+use zbus::interface;
 
-/// Picks the backend for the current session. `ANYQUAKE_BACKEND=kwin|x11`
+/// Name and object of the daemon on the session bus. The compositor side
+/// (KWin script, GNOME Shell extension) calls into it.
+const DBUS_NAME: &str = "de.anyquake.Daemon";
+const DBUS_PATH: &str = "/de/anyquake/Daemon";
+
+struct DaemonCallbacks {
+    events: Sender<Event>,
+}
+
+#[interface(name = "de.anyquake.Daemon")]
+impl DaemonCallbacks {
+    /// No window was found; start the application.
+    fn launch(&self) {
+        let _ = self.events.send(Event::Launch);
+    }
+
+    /// Reports the compositor's id of the window being managed.
+    fn set_managed(&self, id: String) {
+        let _ = self.events.send(Event::Managed(id));
+    }
+
+    /// The GNOME Shell extension was (re-)enabled, e.g. after unlocking the
+    /// screen, and needs the configuration again.
+    fn extension_ready(&self) {
+        let _ = self.events.send(Event::Reload(None));
+    }
+}
+
+/// Connects to the session bus and serves [`DaemonCallbacks`].
+fn session_connection(events: Sender<Event>) -> Result<Connection> {
+    connection::Builder::session()?
+        .name(DBUS_NAME)?
+        .serve_at(DBUS_PATH, DaemonCallbacks { events })?
+        .build()
+        .context("connecting to the D-Bus session bus")
+}
+
+/// Picks the backend for the current session. `ANYQUAKE_BACKEND=kwin|gnome|x11`
 /// overrides the automatic detection.
 fn create_backend(events: Sender<Event>) -> Result<Box<dyn Backend>> {
     let forced = std::env::var("ANYQUAKE_BACKEND")
         .unwrap_or_default()
         .to_lowercase();
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    let is_kde = desktop.to_lowercase().split(':').any(|d| d == "kde");
+    let is_desktop = |name: &str| desktop.split(':').any(|d| d.eq_ignore_ascii_case(name));
     let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
         || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
 
     match forced.as_str() {
         "kwin" => return Ok(Box::new(kwin::KWin::new(events)?)),
+        "gnome" => return Ok(Box::new(gnome::Gnome::new(events)?)),
         "x11" => {
             return Ok(Box::new(Controller::new(
                 x11::X11::new(events.clone())?,
@@ -33,19 +74,22 @@ fn create_backend(events: Sender<Event>) -> Result<Box<dyn Backend>> {
             )));
         }
         "" => {}
-        other => bail!("unknown ANYQUAKE_BACKEND '{other}' (expected 'kwin' or 'x11')"),
+        other => bail!("unknown ANYQUAKE_BACKEND '{other}' (expected 'kwin', 'gnome' or 'x11')"),
     }
 
-    if is_kde {
+    if is_desktop("kde") {
         // KWin works for Wayland and X11 sessions alike and is the more
         // robust choice on Plasma.
         return Ok(Box::new(kwin::KWin::new(events)?));
+    }
+    if is_wayland && is_desktop("gnome") {
+        return Ok(Box::new(gnome::Gnome::new(events)?));
     }
     if is_wayland {
         bail!(
             "the Wayland compositor '{desktop}' is not supported: Wayland does not allow \
              applications to move other windows or grab global keys. Supported are KDE Plasma \
-             (Wayland or X11) and X11 sessions with any EWMH window manager. \
+             (Wayland or X11), GNOME (Wayland) and X11 sessions with any EWMH window manager. \
              ANYQUAKE_BACKEND=x11 can be used to manage XWayland windows only."
         );
     }
