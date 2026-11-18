@@ -3,8 +3,12 @@
 Show and hide **any** application window with a global hotkey - quake-console
 style - on _any_[\*](#platform-support) platform!
 
+![](assets/screenshot.png)
+
 > [!IMPORTANT]
 > This project is mostly vibe coded, but code changes are reviewed and tested by a human (me). Also the logo is 100% human made.
+
+## Features
 
 - One hotkey toggles the configured application. It is started once on the
   first toggle and only hidden and shown afterwards.
@@ -14,15 +18,15 @@ style - on _any_[\*](#platform-support) platform!
   time the window is shown, and again when screens are added, removed or
   change resolution.
 - Lives in the system tray, starts with the system if you want it to.
-- Configuration is a TOML file in the platform config directory
-  (`~/.config/anyquake/config.toml` on Linux).
+- Configuration is stored as a TOML file in the platform config directory
+  (i.e. `~/.config/anyquake/config.toml` on Linux).
 
 ## Platform support
 
 | Platform                         | Backend                        | Status                         |
 | -------------------------------- | ------------------------------ | ------------------------------ |
 | Linux: KDE Plasma (Wayland/X11)  | KWin script loaded over D-Bus  | tested (Fedora 44, Plasma 6.8) |
-| Linux: GNOME (Wayland)           | GNOME Shell extension, D-Bus   | tested (GNOME 50, headless)    |
+| Linux: GNOME (Wayland)           | GNOME Shell extension, D-Bus   | tested (Fedora 44, GNOME 50)   |
 | Linux: X11, any EWMH WM          | X11 / EWMH / RandR, `XGrabKey` | tested                         |
 | Windows 11                       | Win32                          | tested (26H2)                  |
 | macOS                            | Accessibility API + AppKit     | tested (Tahoe 26.7.4)          |
@@ -49,7 +53,7 @@ cargo build --release
 cargo install cargo-deb cargo-generate-rpm
 cargo build --release
 cargo deb --no-build --output dist/
-cargo generate-rpm --output dist/anyquake.rpm
+cargo generate-rpm --output dist/
 ```
 
 The packages install the binary, a desktop entry and the icon (from
