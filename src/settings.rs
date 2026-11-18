@@ -1,9 +1,9 @@
 //! The settings window (runs as its own process: `anyquake settings`).
 
-use crate::config::{Config, MonitorChoice, config_path};
+use crate::config::{Config, LogLevel, MonitorChoice, config_path};
 use crate::geometry::Anchor;
 use crate::hotkey::{Hotkey, KeyDef, find_key};
-use crate::{autostart, icon, ipc, launch};
+use crate::{autostart, icon, ipc, launch, logging};
 use anyhow::{Result, anyhow};
 use eframe::egui;
 use egui_winit::clipboard::Clipboard;
@@ -115,6 +115,7 @@ impl SettingsApp {
             return false;
         }
         self.saved = self.edit.clone();
+        logging::configure(&self.edit.debug);
         self.status = Some(match self.apply() {
             Ok(message) => Status::Info(message),
             Err(e) => Status::Error(format!("Saved, but applying failed: {e:#}")),
@@ -296,6 +297,42 @@ impl SettingsApp {
         });
     }
 
+    fn debug_section(&mut self, ui: &mut egui::Ui) {
+        section(ui, "Debug", |ui| {
+            let debug = &mut self.edit.debug;
+            ui.checkbox(&mut debug.log_file, "Write log to a file")
+                .on_hover_text(
+                    "Useful for bug reports. The file is moved to anyquake.log.old once it \
+                     exceeds 5 MB.",
+                );
+            ui.add_enabled_ui(debug.log_file, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Log level:");
+                    egui::ComboBox::from_id_salt("log-level")
+                        .selected_text(debug.log_level.label())
+                        .show_ui(ui, |ui| {
+                            for level in LogLevel::ALL {
+                                ui.selectable_value(&mut debug.log_level, level, level.label());
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Most detailed messages written to the file. Messages of \
+                             libraries are only included from warnings on.",
+                        );
+                });
+            });
+            if let Some(path) = logging::path() {
+                ui.horizontal(|ui| {
+                    ui.weak(format!("Log file: {}", path.display()));
+                    if path.exists() {
+                        footer_link(ui, "Open", file_url(&path));
+                    }
+                });
+            }
+        });
+    }
+
     fn close_dialog(&mut self, ctx: &egui::Context) {
         if !self.confirm_close {
             return;
@@ -440,6 +477,7 @@ impl eframe::App for SettingsApp {
                 self.hotkey_section(ui);
                 self.placement_section(ui);
                 self.general_section(ui);
+                self.debug_section(ui);
                 ui.add_space(8.0);
                 if let Ok(path) = config_path() {
                     ui.weak(format!("Configuration: {}", path.display()));
@@ -449,6 +487,16 @@ impl eframe::App for SettingsApp {
         });
 
         self.close_dialog(&ctx);
+    }
+}
+
+/// `file://` URL of an absolute path (`file:///C:/...` on Windows).
+fn file_url(path: &std::path::Path) -> String {
+    let path = path.display().to_string().replace('\\', "/");
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
     }
 }
 

@@ -129,7 +129,9 @@ Closing the settings window keeps AnyQuake running in the tray. Quitting
 AnyQuake gives the managed window back: it shows up in the taskbar again and
 is no longer kept on top.
 
-`RUST_LOG=debug` enables verbose logging.
+`RUST_LOG=debug` enables verbose logging on the terminal. To keep the log,
+turn on "Write log to a file" in the settings and pick a level (see `[debug]`
+below); it is independent of `RUST_LOG`.
 
 ## Configuration
 
@@ -158,6 +160,13 @@ width = 100.0           # percent of the screen
 height = 50.0
 respect_panels = true   # don't cover panels / taskbar / menu bar
 always_on_top = true
+
+[debug]
+# Also write the log to anyquake.log in the cache directory
+# (~/.cache/anyquake/ on Linux). Moved to anyquake.log.old above 5 MB.
+log_file = false
+log_level = "info"      # error, warn, info, debug, trace (for the file only;
+                        # other libraries are only logged from warn on)
 ```
 
 ## Notes

@@ -16,6 +16,57 @@ pub struct Config {
     pub general: General,
     pub target: Target,
     pub placement: Placement,
+    pub debug: Debug,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Debug {
+    /// Also write the log output to a file (see `logging::path`).
+    pub log_file: bool,
+    /// Most detailed messages written to the log file.
+    pub log_level: LogLevel,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Error,
+    Warn,
+    #[default]
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    pub const ALL: [LogLevel; 5] = [
+        LogLevel::Error,
+        LogLevel::Warn,
+        LogLevel::Info,
+        LogLevel::Debug,
+        LogLevel::Trace,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LogLevel::Error => "Errors",
+            LogLevel::Warn => "Warnings",
+            LogLevel::Info => "Info",
+            LogLevel::Debug => "Debug",
+            LogLevel::Trace => "Trace (very verbose)",
+        }
+    }
+
+    pub fn filter(self) -> log::LevelFilter {
+        match self {
+            LogLevel::Error => log::LevelFilter::Error,
+            LogLevel::Warn => log::LevelFilter::Warn,
+            LogLevel::Info => log::LevelFilter::Info,
+            LogLevel::Debug => log::LevelFilter::Debug,
+            LogLevel::Trace => log::LevelFilter::Trace,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -200,6 +251,10 @@ mod tests {
         let config: Config = toml::from_str("[target]\ncommand = \"konsole\"\n").unwrap();
         assert_eq!(config.target.command, "konsole");
         assert_eq!(config.placement, Placement::default());
+        assert!(!config.debug.log_file, "file logging is off by default");
+        assert_eq!(config.debug.log_level, LogLevel::Info);
+        let debug: Debug = toml::from_str("log_file = true\nlog_level = \"trace\"\n").unwrap();
+        assert_eq!(debug.log_level, LogLevel::Trace);
     }
 
     #[test]

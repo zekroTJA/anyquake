@@ -15,6 +15,7 @@ mod hotkey;
 mod icon;
 mod ipc;
 mod launch;
+mod logging;
 mod platform;
 mod settings;
 mod state;
@@ -35,13 +36,17 @@ Commands:
 
 Environment:
   RUST_LOG=debug          More verbose logging
-  ANYQUAKE_BACKEND=x11    Force a backend on Linux (kwin, x11)
+  ANYQUAKE_BACKEND=x11    Force a backend on Linux (kwin, gnome, x11)
 ";
 
 fn main() -> ExitCode {
     #[cfg(windows)]
     attach_parent_console();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    logging::init();
+    // Errors in the file are reported by the daemon / settings window.
+    if let Ok(Some(config)) = config::Config::load() {
+        logging::configure(&config.debug);
+    }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {

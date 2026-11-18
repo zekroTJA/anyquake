@@ -92,6 +92,7 @@ impl Daemon {
         };
         let first_run = loaded.is_none();
         self.config = loaded.unwrap_or_default();
+        crate::logging::configure(&self.config.debug);
         if let Err(e) = self.backend.configure(&self.config) {
             log::error!("configuring backend: {e:#}");
         }
@@ -163,6 +164,7 @@ impl Daemon {
         if config.general.autostart != self.config.general.autostart {
             autostart::sync(config.general.autostart)?;
         }
+        crate::logging::configure(&config.debug);
         self.config = config;
         self.backend.configure(&self.config)?;
         log::info!("configuration reloaded");
