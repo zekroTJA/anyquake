@@ -3,7 +3,7 @@
 //! logic inside a KWin script).
 
 use crate::config::{Config, MonitorChoice, Placement};
-use crate::daemon::{Backend, Event};
+use crate::daemon::{Backend, Event, LAUNCH_TIMEOUT};
 use crate::geometry::{self, Anchor, Rect};
 use anyhow::Result;
 use std::collections::HashSet;
@@ -12,8 +12,6 @@ use std::hash::Hash;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-/// How long to wait for the window of a freshly started application.
-const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const LAUNCH_POLL: Duration = Duration::from_millis(50);
 /// How often the screen layout is compared on platforms without change
 /// notifications (see [`WindowOps::POLL_SCREENS`]).
@@ -130,6 +128,11 @@ impl<O: WindowOps> Controller<O> {
         }
     }
 
+    /// Tells the daemon what toggling `app` did, for the log.
+    fn report(&self, app: usize, action: &str) {
+        let _ = self.events.send(Event::Toggled(app, action.to_owned()));
+    }
+
     /// Whether another application than `app` manages `window`.
     fn managed_by_other(&self, app: usize, window: O::Window) -> bool {
         self.apps
@@ -201,12 +204,9 @@ impl<O: WindowOps> Controller<O> {
             return Ok(());
         };
         if pending.since.elapsed() > LAUNCH_TIMEOUT {
+            // Reported by the daemon, which watches launches of all backends.
             self.apps[app].pending = None;
-            anyhow::bail!(
-                "no window matching '{}' appeared after starting the application; check the \
-                 'window match' setting",
-                self.apps[app].matcher
-            );
+            return Ok(());
         }
         let candidates = self.ops.find_all(&self.apps[app].matcher)?;
         let new = candidates.into_iter().find(|&w| {
@@ -344,10 +344,11 @@ impl<O: WindowOps> Backend for Controller<O> {
     fn toggle(&mut self, app: usize) -> Result<()> {
         anyhow::ensure!(app < self.apps.len(), "unknown application {}", app + 1);
         if self.apps[app].pending.is_some() {
-            log::debug!("still waiting for the application to start");
+            self.report(app, "still waiting for the application to start");
             return Ok(());
         }
         let Some(window) = self.current_window(app)? else {
+            self.report(app, "no window, launching");
             return self.start_launch(app);
         };
 
@@ -359,9 +360,11 @@ impl<O: WindowOps> Backend for Controller<O> {
             let target = select_monitor(&mut self.ops, placement, &monitors, None)?;
             let current = self.monitor_of(window, &monitors);
             if current.is_none_or(|m| m.name == target.name) {
+                self.report(app, "hiding");
                 return self.ops.hide(window);
             }
         }
+        self.report(app, "showing");
         self.show(app, window)
     }
 

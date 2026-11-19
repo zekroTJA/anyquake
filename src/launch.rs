@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result, bail};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Splits a command line into program and arguments.
 ///
@@ -58,8 +60,11 @@ pub fn program_stem(command: &str) -> String {
 }
 
 /// Spawns `command` fully detached from anyquake, so it keeps running when
-/// anyquake exits.
-pub fn spawn_detached(command: &str) -> Result<()> {
+/// anyquake exits. `label` names the application in log messages.
+///
+/// The returned flag is set if the process exits with an error shortly
+/// after starting (the error is logged then).
+pub fn spawn_detached(command: &str, label: &str) -> Result<Arc<AtomicBool>> {
     let args = split_command(command).context("invalid quoting in command")?;
     let Some((program, args)) = args.split_first() else {
         bail!("no command configured");
@@ -90,11 +95,23 @@ pub fn spawn_detached(command: &str) -> Result<()> {
         .spawn()
         .with_context(|| format!("starting '{command}'"))?;
     log::info!("started '{command}' (pid {})", child.id());
-    // Reap the child when it exits so no zombie stays around.
-    std::thread::spawn(move || {
-        let _ = child.wait();
+    // Reap the child when it exits so no zombie stays around. An error exit
+    // shortly after starting means the launch failed. (Launchers handing
+    // over to a running instance exit right away, but successfully.)
+    let started = std::time::Instant::now();
+    let command = command.to_owned();
+    let label = label.to_owned();
+    let failed = Arc::new(AtomicBool::new(false));
+    let failed_flag = failed.clone();
+    std::thread::spawn(move || match child.wait() {
+        Ok(status) if !status.success() && started.elapsed() < crate::daemon::LAUNCH_TIMEOUT => {
+            log::error!("failed to launch {label}: '{command}' exited with {status}");
+            failed_flag.store(true, Ordering::Relaxed);
+        }
+        Ok(status) => log::debug!("'{command}' ({label}) exited with {status}"),
+        Err(e) => log::warn!("waiting for '{command}' ({label}): {e}"),
     });
-    Ok(())
+    Ok(failed)
 }
 
 /// Starts the settings window as a separate process. The caller is

@@ -146,12 +146,19 @@ function hide(w) {
     w.minimized = true;
 }
 
+// Tells the daemon what toggling did, for its log.
+function report(app, action) {
+    callDBus(DBUS_SERVICE, DBUS_PATH, DBUS_IFACE, "AppToggled", app.config.index, action);
+}
+
 function toggle(app) {
     if (app.launchRequestedAt && Date.now() - app.launchRequestedAt < LAUNCH_TIMEOUT_MS) {
-        return; // still waiting for the application to start
+        report(app, "still waiting for the application to start");
+        return;
     }
     const w = findWindow(app);
     if (!w) {
+        report(app, "no window, launching");
         app.knownBeforeLaunch = workspace.windowList().filter(function (w) {
             return matches(app, w);
         });
@@ -161,8 +168,10 @@ function toggle(app) {
     }
     const onTarget = w.output && w.output.name === targetOutput(app).name;
     if (!w.minimized && workspace.activeWindow === w && onTarget) {
+        report(app, "hiding");
         hide(w);
     } else {
+        report(app, "showing");
         show(app, w);
     }
 }

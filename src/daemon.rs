@@ -3,11 +3,18 @@
 
 use crate::config::Config;
 use crate::{autostart, launch};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use std::collections::HashMap;
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long to wait for the window of a freshly started application before
+/// reporting the launch as failed. The KWin script and the GNOME Shell
+/// extension use the same value.
+pub const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Something the daemon has to react to.
 /// Receives the outcome of a request (used to report errors back to the
@@ -29,6 +36,9 @@ pub enum Event {
     Quit,
     /// A backend asks the daemon to start the application with this index.
     Launch(usize),
+    /// A backend reports what toggling the application with this index did
+    /// (shown, hidden, launching...), for the log.
+    Toggled(usize, String),
     /// The screen layout changed (monitor added/removed, resolution, ...).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     ScreensChanged,
@@ -74,6 +84,10 @@ pub struct Daemon {
     config: Config,
     /// The settings window process while it is open.
     settings: Arc<Mutex<Option<Child>>>,
+    /// Applications started but without a window reported yet: when they
+    /// were started and whether the process already failed (and that was
+    /// logged).
+    launches: HashMap<usize, (Instant, Arc<AtomicBool>)>,
 }
 
 impl Daemon {
@@ -83,6 +97,7 @@ impl Daemon {
             backend,
             config: Config::default(),
             settings: Arc::default(),
+            launches: HashMap::new(),
         }
     }
 
@@ -135,12 +150,24 @@ impl Daemon {
                 self.open_settings();
                 Ok(())
             }
-            Event::Launch(app) => match self.config.apps.get(app) {
-                Some(app) => launch::spawn_detached(&app.target.command),
-                None => Ok(()),
-            },
+            Event::Launch(app) => self.launch(app),
+            Event::Toggled(app, action) => {
+                if let Some(config) = self.config.apps.get(app) {
+                    log::debug!(
+                        "toggled {} ({}): {action}",
+                        config.label(app),
+                        config.hotkey
+                    );
+                }
+                Ok(())
+            }
             Event::ScreensChanged => self.backend.screens_changed(),
             Event::Managed(app, id) => {
+                if self.launches.remove(&app).is_some()
+                    && let Some(config) = self.config.apps.get(app)
+                {
+                    log::info!("window of {} appeared", config.label(app));
+                }
                 if let Some(config) = self.config.apps.get(app) {
                     let matcher = config.target.effective_match();
                     crate::state::save_managed_window(self.backend.name(), app, &matcher, &id);
@@ -169,12 +196,10 @@ impl Daemon {
     }
 
     fn toggle(&mut self, app: usize) -> Result<()> {
-        if self
-            .config
-            .apps
-            .get(app)
-            .is_some_and(|app| app.target.is_configured())
+        if let Some(config) = self.config.apps.get(app)
+            && config.target.is_configured()
         {
+            log::debug!("toggling {} ({})", config.label(app), config.hotkey);
             self.backend.toggle(app)
         } else {
             log::warn!("application {} is not configured", app + 1);
@@ -183,11 +208,62 @@ impl Daemon {
         }
     }
 
+    /// Starts application `app` and watches for its window to appear.
+    fn launch(&mut self, app: usize) -> Result<()> {
+        let Some(config) = self.config.apps.get(app) else {
+            return Ok(());
+        };
+        let label = config.label(app);
+        log::info!("starting {label}: {}", config.target.command);
+        let failed = launch::spawn_detached(&config.target.command, &label)
+            .with_context(|| format!("failed to launch {label}"))?;
+        self.launches.insert(app, (Instant::now(), failed));
+        Ok(())
+    }
+
+    /// Reports launches whose window did not appear in time.
+    fn check_launches(&mut self) {
+        let expired: Vec<usize> = self
+            .launches
+            .iter()
+            .filter(|(_, (since, _))| since.elapsed() >= LAUNCH_TIMEOUT)
+            .map(|(&app, _)| app)
+            .collect();
+        for app in expired {
+            let Some((_, failed)) = self.launches.remove(&app) else {
+                continue;
+            };
+            let Some(config) = self.config.apps.get(app) else {
+                continue;
+            };
+            if failed.load(Ordering::Relaxed) {
+                continue; // the failed process was reported already
+            }
+            log::error!(
+                "failed to launch {}: no window matching '{}' appeared within {} s after \
+                 running '{}'. Check the command and the 'window match' setting.",
+                config.label(app),
+                config.target.effective_match(),
+                LAUNCH_TIMEOUT.as_secs(),
+                config.target.command
+            );
+        }
+    }
+
     pub fn poll_interval(&self) -> Option<Duration> {
-        self.backend.poll_interval()
+        let launch = self
+            .launches
+            .values()
+            .map(|(since, _)| LAUNCH_TIMEOUT.saturating_sub(since.elapsed()))
+            .min();
+        match (self.backend.poll_interval(), launch) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     pub fn tick(&mut self) {
+        self.check_launches();
         if let Err(e) = self.backend.tick() {
             log::error!("{e:#}");
         }
@@ -199,7 +275,11 @@ impl Daemon {
             autostart::sync(config.general.autostart)?;
         }
         crate::logging::configure(&config.debug);
-        self.config = config;
+        // Launches of applications that changed can't be matched anymore.
+        let old = std::mem::replace(&mut self.config, config);
+        self.launches.retain(|&app, _| {
+            old.apps.get(app).map(|a| &a.target) == self.config.apps.get(app).map(|a| &a.target)
+        });
         self.backend.configure(&self.config)?;
         log::info!("configuration reloaded");
         Ok(())

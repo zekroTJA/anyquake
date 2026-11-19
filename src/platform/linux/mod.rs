@@ -44,6 +44,15 @@ impl DaemonCallbacks {
         }
     }
 
+    /// Reports what toggling application `app` did (for the log). Hotkeys
+    /// are handled by the compositor, so this is the only way to learn
+    /// about them.
+    fn app_toggled(&self, app: String, action: String) {
+        if let Ok(app) = app.parse() {
+            let _ = self.events.send(Event::Toggled(app, action));
+        }
+    }
+
     /// [`Self::launch_app`] for the first application. Used by the GNOME
     /// Shell extension of AnyQuake 0.5 until the next login.
     fn launch(&self) {

@@ -193,21 +193,33 @@ class App {
             window.unmake_above();
     }
 
+    // Tells the daemon what toggling did, for its log.
+    _report(action) {
+        this._controller.callDaemon('AppToggled',
+            new GLib.Variant('(ss)', [this.config.index, action]));
+    }
+
     toggle(timestamp) {
-        if (this.launchRequestedAt && Date.now() - this.launchRequestedAt < LAUNCH_TIMEOUT_MS)
-            return; // still waiting for the application to start
+        if (this.launchRequestedAt && Date.now() - this.launchRequestedAt < LAUNCH_TIMEOUT_MS) {
+            this._report('still waiting for the application to start');
+            return;
+        }
         const window = this.findWindow();
         if (!window) {
+            this._report('no window, launching');
             this.knownBeforeLaunch = this.windows();
             this.launchRequestedAt = Date.now();
             this._controller.callDaemon('LaunchApp', new GLib.Variant('(s)', [this.config.index]));
             return;
         }
         const visible = !window.minimized && window.has_focus() && !Main.overview.visible;
-        if (visible && window.get_monitor() === this.targetMonitor())
+        if (visible && window.get_monitor() === this.targetMonitor()) {
+            this._report('hiding');
             window.minimize();
-        else
+        } else {
+            this._report('showing');
             this.show(window, timestamp);
+        }
     }
 
     resetLaunch() {
