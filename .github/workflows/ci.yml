@@ -5,8 +5,16 @@ on:
   # runs the tests itself.
   push:
     branches: ["**"]
+    paths:
+      - src/
+      - Cargo.lock
+      - Cargo.toml
   # Pull requests from forks don't trigger `push` in this repository.
   pull_request:
+    paths:
+      - src/
+      - Cargo.lock
+      - Cargo.toml
 
 jobs:
   test:
