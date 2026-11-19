@@ -10,13 +10,67 @@ use std::path::PathBuf;
 
 pub const APP_NAME: &str = "anyquake";
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RawConfig")]
 pub struct Config {
     pub general: General,
-    pub target: Target,
-    pub placement: Placement,
+    /// The applications toggled by AnyQuake, each with its own hotkey.
+    #[serde(rename = "app")]
+    pub apps: Vec<App>,
     pub debug: Debug,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            general: General::default(),
+            apps: vec![App::default()],
+            debug: Debug::default(),
+        }
+    }
+}
+
+/// What is read from the file. Besides the current format it accepts the
+/// one of AnyQuake 0.5 and older, which had a single application configured
+/// in `[target]`, `[placement]` and `general.hotkey`.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawConfig {
+    general: RawGeneral,
+    app: Vec<App>,
+    debug: Debug,
+    target: Option<Target>,
+    placement: Option<Placement>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawGeneral {
+    autostart: bool,
+    hotkey: Option<Hotkey>,
+}
+
+impl From<RawConfig> for Config {
+    fn from(raw: RawConfig) -> Self {
+        let mut apps = raw.app;
+        let legacy =
+            raw.target.is_some() || raw.placement.is_some() || raw.general.hotkey.is_some();
+        if apps.is_empty() && legacy {
+            apps.push(App {
+                name: String::new(),
+                hotkey: raw.general.hotkey.unwrap_or_default(),
+                target: raw.target.unwrap_or_default(),
+                placement: raw.placement.unwrap_or_default(),
+            });
+        }
+        Self {
+            general: General {
+                autostart: raw.general.autostart,
+            },
+            apps,
+            debug: raw.debug,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -72,11 +126,36 @@ impl LogLevel {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct General {
-    /// Key combination toggling the target window.
-    #[serde(with = "hotkey_serde")]
-    pub hotkey: Hotkey,
     /// Start anyquake when the user logs in.
     pub autostart: bool,
+}
+
+/// One application toggled with its own hotkey.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct App {
+    /// Optional display name (tray menu, settings, `anyquake toggle NAME`).
+    pub name: String,
+    /// Key combination toggling the application's window.
+    pub hotkey: Hotkey,
+    pub target: Target,
+    pub placement: Placement,
+}
+
+impl App {
+    /// Name shown to the user: the configured name, else the window match,
+    /// else the position in the list.
+    pub fn label(&self, index: usize) -> String {
+        let name = self.name.trim();
+        if !name.is_empty() {
+            return name.to_owned();
+        }
+        let matcher = self.target.effective_match();
+        if !matcher.is_empty() {
+            return matcher;
+        }
+        format!("Application {}", index + 1)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -184,26 +263,43 @@ impl Default for Placement {
     }
 }
 
-mod hotkey_serde {
-    use crate::hotkey::Hotkey;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(hotkey: &Hotkey, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&hotkey.to_string())
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Hotkey, D::Error> {
-        let s = String::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
 pub fn config_path() -> Result<PathBuf> {
     let dir = dirs::config_dir().context("could not determine the config directory")?;
     Ok(dir.join(APP_NAME).join("config.toml"))
 }
 
 impl Config {
+    /// Whether at least one application is set up.
+    pub fn is_configured(&self) -> bool {
+        self.apps.iter().any(|app| app.target.is_configured())
+    }
+
+    /// Finds an application by its 1-based position or (case-insensitively)
+    /// by its name as shown to the user.
+    pub fn find_app(&self, selector: &str) -> Option<usize> {
+        let selector = selector.trim();
+        if let Ok(n) = selector.parse::<usize>() {
+            return (1..=self.apps.len()).contains(&n).then(|| n - 1);
+        }
+        (0..self.apps.len()).find(|&i| self.apps[i].label(i).eq_ignore_ascii_case(selector))
+    }
+
+    /// The first two applications sharing a hotkey, if any.
+    pub fn duplicate_hotkey(&self) -> Option<(usize, usize)> {
+        (0..self.apps.len()).find_map(|i| {
+            (i + 1..self.apps.len())
+                .find(|&j| self.apps[i].hotkey == self.apps[j].hotkey)
+                .map(|j| (i, j))
+        })
+    }
+
+    /// A hotkey not used by any application yet (for a new one).
+    pub fn unused_hotkey(&self) -> Hotkey {
+        crate::hotkey::function_keys()
+            .find(|hotkey| self.apps.iter().all(|app| &app.hotkey != hotkey))
+            .unwrap_or_default()
+    }
+
     /// Loads the configuration. Returns `None` if no config file exists yet.
     pub fn load() -> Result<Option<Config>> {
         let path = config_path()?;
@@ -238,19 +334,84 @@ mod tests {
     #[test]
     fn roundtrip() {
         let mut config = Config::default();
-        config.target.command = "kitty --class quake".into();
-        config.placement.monitor = MonitorChoice::Named("DP-2".into());
-        config.placement.anchor = Anchor::BottomRight;
-        config.general.hotkey = "Ctrl+Backtick".parse().unwrap();
+        config.general.autostart = true;
+        config.apps[0].name = "Terminal".into();
+        config.apps[0].target.command = "kitty --class quake".into();
+        config.apps[0].placement.monitor = MonitorChoice::Named("DP-2".into());
+        config.apps[0].placement.anchor = Anchor::BottomRight;
+        config.apps[0].hotkey = "Ctrl+Backtick".parse().unwrap();
+        config.apps.push(App {
+            hotkey: config.unused_hotkey(),
+            ..App::default()
+        });
+        config.apps[1].target.command = "firefox".into();
+        config.debug.log_file = true;
         let text = toml::to_string_pretty(&config).unwrap();
         assert_eq!(toml::from_str::<Config>(&text).unwrap(), config);
     }
 
     #[test]
+    fn empty_file() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.apps.is_empty());
+        assert!(!config.is_configured());
+    }
+
+    #[test]
+    fn legacy_single_app() {
+        let config: Config = toml::from_str(
+            "[general]\nhotkey = \"Ctrl+Backtick\"\nautostart = true\n\
+             [target]\ncommand = \"konsole\"\n[placement]\nheight = 30.0\n",
+        )
+        .unwrap();
+        assert!(config.general.autostart);
+        assert_eq!(config.apps.len(), 1);
+        let app = &config.apps[0];
+        assert_eq!(app.hotkey.to_string(), "Ctrl+Backtick");
+        assert_eq!(app.target.command, "konsole");
+        assert_eq!(app.placement.height, 30.0);
+        assert_eq!(app.placement.width, Placement::default().width);
+        // Written back in the new format.
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            text.contains("[[app]]") && !text.contains("[target]"),
+            "{text}"
+        );
+        assert_eq!(toml::from_str::<Config>(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn invalid_hotkey_is_an_error() {
+        assert!(toml::from_str::<Config>("[[app]]\nhotkey = \"Ctrl+Foo\"\n").is_err());
+        assert!(toml::from_str::<Config>("[general]\nhotkey = \"Ctrl+Foo\"\n").is_err());
+    }
+
+    #[test]
+    fn find_and_duplicates() {
+        let mut config = Config::default();
+        config.apps[0].target.command = "konsole".into();
+        config.apps.push(App {
+            name: "Browser".into(),
+            hotkey: config.unused_hotkey(),
+            ..App::default()
+        });
+        assert_eq!(config.apps[1].hotkey.to_string(), "F11");
+        assert_eq!(config.find_app("konsole"), Some(0));
+        assert_eq!(config.find_app("browser"), Some(1));
+        assert_eq!(config.find_app("2"), Some(1));
+        assert_eq!(config.find_app("3"), None);
+        assert_eq!(config.find_app("0"), None);
+        assert_eq!(config.duplicate_hotkey(), None);
+        config.apps[1].hotkey = config.apps[0].hotkey.clone();
+        assert_eq!(config.duplicate_hotkey(), Some((0, 1)));
+    }
+
+    #[test]
     fn partial_file_uses_defaults() {
-        let config: Config = toml::from_str("[target]\ncommand = \"konsole\"\n").unwrap();
-        assert_eq!(config.target.command, "konsole");
-        assert_eq!(config.placement, Placement::default());
+        let config: Config =
+            toml::from_str("[[app]]\n[app.target]\ncommand = \"konsole\"\n").unwrap();
+        assert_eq!(config.apps[0].target.command, "konsole");
+        assert_eq!(config.apps[0].placement, Placement::default());
         assert!(!config.debug.log_file, "file logging is off by default");
         assert_eq!(config.debug.log_level, LogLevel::Info);
         let debug: Debug = toml::from_str("log_file = true\nlog_level = \"trace\"\n").unwrap();

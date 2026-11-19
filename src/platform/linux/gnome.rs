@@ -3,8 +3,8 @@
 //! Like on KDE, Wayland does not let normal clients grab global keys or
 //! move other applications' windows, so the work happens inside the
 //! compositor: anyquake installs a small GNOME Shell extension that owns the
-//! shortcut and manages the window. It is configured over D-Bus and calls
-//! back into this process to start the application.
+//! shortcuts and manages the windows. It is configured over D-Bus and calls
+//! back into this process to start the applications.
 //!
 //! GNOME Shell only discovers newly installed extensions at login, so after
 //! the first installation (and after updates of the extension) the user has
@@ -27,7 +27,7 @@ const NAME: &str = "GNOME Shell";
 const EXTENSION_UUID: &str = "anyquake@zekrotja.github.io";
 const EXTENSION_SOURCE: &str = include_str!("gnome-extension.js");
 /// Bump together with `VERSION` in the extension on every change of it.
-const EXTENSION_VERSION: u32 = 1;
+const EXTENSION_VERSION: u32 = 2;
 /// The first GNOME version with ES module extensions.
 const MIN_SHELL_VERSION: u32 = 45;
 
@@ -292,19 +292,21 @@ impl Backend for Gnome {
     }
 
     fn configure(&mut self, config: &Config) -> Result<()> {
-        let p = &config.placement;
-        let extension_config = json!({
-            "match": config.target.effective_match(),
-            "reuseExisting": config.target.reuse_existing,
-            "managedId": crate::state::load_managed_window(NAME).unwrap_or_default(),
-            "monitor": String::from(p.monitor.clone()),
-            "anchor": p.anchor.id(),
-            "width": p.width,
-            "height": p.height,
-            "respectPanels": p.respect_panels,
-            "alwaysOnTop": p.always_on_top,
-            "accelerator": config.general.hotkey.gtk_accelerator(),
-        });
+        let apps: Vec<_> = config
+            .apps
+            .iter()
+            .enumerate()
+            .map(|(i, app)| {
+                let mut json = super::app_json(NAME, i, app);
+                json["accelerator"] = app.hotkey.gtk_accelerator().into();
+                json
+            })
+            .collect();
+        // Version 1 of the extension (AnyQuake 0.5) is still running until
+        // the next login. It only knows a single application, configured by
+        // the top level keys.
+        let mut extension_config = apps.first().cloned().unwrap_or_else(|| json!({}));
+        extension_config["apps"] = apps.into();
         let warning: String = self
             .extension("Configure", &(extension_config.to_string(),))?
             .body()
@@ -312,15 +314,32 @@ impl Backend for Gnome {
         if !warning.is_empty() {
             bail!("{warning}");
         }
+        let hotkeys: Vec<_> = config
+            .apps
+            .iter()
+            .map(|app| app.hotkey.to_string())
+            .collect();
         log::info!(
-            "GNOME Shell extension configured, hotkey {}",
-            config.general.hotkey
+            "GNOME Shell extension configured, hotkeys {}",
+            hotkeys.join(", ")
         );
         Ok(())
     }
 
-    fn toggle(&mut self) -> Result<()> {
-        self.extension("Toggle", &())?;
+    fn toggle(&mut self, app: usize) -> Result<()> {
+        let version = self
+            .running_extension_version()
+            .unwrap_or(EXTENSION_VERSION);
+        if version < 2 {
+            anyhow::ensure!(
+                app == 0,
+                "log out and back in once to load the updated GNOME Shell extension, which \
+                 supports more than one application"
+            );
+            self.extension("Toggle", &())?;
+        } else {
+            self.extension("ToggleApp", &(app as u32,))?;
+        }
         Ok(())
     }
 

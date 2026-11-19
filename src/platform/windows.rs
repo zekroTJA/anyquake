@@ -1,6 +1,6 @@
 //! Windows backend (Win32).
 
-use super::desktop::HotkeyRegistration;
+use super::desktop::{HotkeyApps, HotkeyRegistration};
 use crate::config::Config;
 use crate::controller::{Monitor, ShowParams, WindowOps};
 use crate::geometry::Rect;
@@ -41,14 +41,14 @@ pub struct Win32 {
 }
 
 impl Win32 {
-    pub fn new() -> Result<Self> {
+    pub fn new(hotkey_apps: HotkeyApps) -> Result<Self> {
         // Work with physical pixels on every monitor regardless of scaling.
         // SAFETY: plain Win32 call; failure (already set) is harmless.
         unsafe {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         }
         Ok(Self {
-            hotkey: HotkeyRegistration::new()?,
+            hotkey: HotkeyRegistration::new(hotkey_apps)?,
         })
     }
 }
@@ -185,7 +185,8 @@ impl WindowOps for Win32 {
     }
 
     fn configure(&mut self, config: &Config) -> Result<()> {
-        self.hotkey.set(&config.general.hotkey)
+        let hotkeys: Vec<_> = config.apps.iter().map(|app| &app.hotkey).collect();
+        self.hotkey.set(&hotkeys)
     }
 
     fn find_all(&mut self, matcher: &str) -> Result<Vec<Hwnd>> {

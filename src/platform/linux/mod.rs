@@ -5,6 +5,7 @@ mod gnome;
 mod kwin;
 mod x11;
 
+use crate::config::App;
 use crate::controller::Controller;
 use crate::daemon::{Backend, Daemon, Event};
 use crate::{icon, ipc};
@@ -27,14 +28,32 @@ struct DaemonCallbacks {
 
 #[interface(name = "de.anyquake.Daemon")]
 impl DaemonCallbacks {
-    /// No window was found; start the application.
-    fn launch(&self) {
-        let _ = self.events.send(Event::Launch);
+    /// No window was found for the application with index `app` (a decimal
+    /// number: KWin scripts can't send D-Bus integers reliably); start it.
+    fn launch_app(&self, app: String) {
+        if let Ok(app) = app.parse() {
+            let _ = self.events.send(Event::Launch(app));
+        }
     }
 
-    /// Reports the compositor's id of the window being managed.
+    /// Reports the compositor's id of the window managed for the
+    /// application with index `app`.
+    fn set_managed_app(&self, app: String, id: String) {
+        if let Ok(app) = app.parse() {
+            let _ = self.events.send(Event::Managed(app, id));
+        }
+    }
+
+    /// [`Self::launch_app`] for the first application. Used by the GNOME
+    /// Shell extension of AnyQuake 0.5 until the next login.
+    fn launch(&self) {
+        let _ = self.events.send(Event::Launch(0));
+    }
+
+    /// [`Self::set_managed_app`] for the first application (see
+    /// [`Self::launch`]).
     fn set_managed(&self, id: String) {
-        let _ = self.events.send(Event::Managed(id));
+        let _ = self.events.send(Event::Managed(0, id));
     }
 
     /// The GNOME Shell extension was (re-)enabled, e.g. after unlocking the
@@ -51,6 +70,25 @@ fn session_connection(events: Sender<Event>) -> Result<Connection> {
         .serve_at(DBUS_PATH, DaemonCallbacks { events })?
         .build()
         .context("connecting to the D-Bus session bus")
+}
+
+/// Configuration of one application as passed to the KWin script and the
+/// GNOME Shell extension. They add their own keys (hotkey etc.).
+fn app_json(backend: &str, index: usize, app: &App) -> serde_json::Value {
+    let p = &app.placement;
+    let matcher = app.target.effective_match();
+    serde_json::json!({
+        "index": index.to_string(),
+        "match": matcher,
+        "reuseExisting": app.target.reuse_existing,
+        "managedId": crate::state::load_managed_window(backend, index, &matcher).unwrap_or_default(),
+        "monitor": String::from(p.monitor.clone()),
+        "anchor": p.anchor.id(),
+        "width": p.width,
+        "height": p.height,
+        "respectPanels": p.respect_panels,
+        "alwaysOnTop": p.always_on_top,
+    })
 }
 
 /// Picks the backend for the current session. `ANYQUAKE_BACKEND=kwin|gnome|x11`
@@ -101,6 +139,8 @@ fn create_backend(events: Sender<Event>) -> Result<Box<dyn Backend>> {
 
 struct Tray {
     events: Sender<Event>,
+    /// Names of the configured applications.
+    apps: Vec<String>,
 }
 
 impl Tray {
@@ -141,13 +181,19 @@ impl ksni::Tray for Tray {
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
-        vec![
+        let toggles = self.apps.iter().enumerate().map(|(i, name)| {
             StandardItem {
-                label: "Toggle window".into(),
-                activate: Box::new(|tray: &mut Self| tray.send(Event::Toggle)),
+                label: format!("Toggle {name}"),
+                activate: Box::new(move |tray: &mut Self| tray.send(Event::Toggle(i))),
                 ..Default::default()
             }
-            .into(),
+            .into()
+        });
+        let mut items: Vec<_> = toggles.collect();
+        if !items.is_empty() {
+            items.push(ksni::MenuItem::Separator);
+        }
+        items.extend([
             StandardItem {
                 label: "Settings…".into(),
                 icon_name: "configure".into(),
@@ -163,7 +209,8 @@ impl ksni::Tray for Tray {
                 ..Default::default()
             }
             .into(),
-        ]
+        ]);
+        items
     }
 }
 
@@ -175,7 +222,11 @@ pub fn run_daemon(open_settings: bool) -> Result<()> {
     let mut daemon = Daemon::new(backend);
 
     // Keep the handle alive for the lifetime of the daemon.
-    let _tray = match (Tray { events: tx.clone() }).spawn() {
+    let tray = Tray {
+        events: tx.clone(),
+        apps: Vec::new(),
+    };
+    let tray = match tray.spawn() {
         Ok(handle) => Some(handle),
         Err(e) => {
             log::warn!("no system tray available ({e}); use `anyquake settings` instead");
@@ -192,7 +243,16 @@ pub fn run_daemon(open_settings: bool) -> Result<()> {
 
     daemon.start(open_settings);
 
+    let mut labels = Vec::new();
     loop {
+        // Keep the tray menu in sync with the configured applications.
+        if let Some(tray) = &tray
+            && labels != daemon.app_labels()
+        {
+            labels = daemon.app_labels();
+            let apps = labels.clone();
+            tray.update(move |tray| tray.apps = apps);
+        }
         let timeout = daemon.poll_interval().unwrap_or(Duration::from_secs(3600));
         match rx.recv_timeout(timeout) {
             Ok(event) => {

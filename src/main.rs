@@ -30,7 +30,9 @@ Commands:
              (only opens the settings if AnyQuake is already running)
   daemon     Start AnyQuake in the background (used for autostart)
   settings   Open the settings window
-  toggle     Show / hide the configured application
+  toggle [APP]
+             Show / hide an application: its name or number in the list
+             of applications (default: the first one)
   reload     Re-read the configuration file
   quit       Stop the running AnyQuake instance
 
@@ -54,6 +56,9 @@ fn main() -> ExitCode {
         ["daemon"] => start_daemon(false),
         ["settings"] => settings::run(),
         [command @ ("toggle" | "reload" | "quit")] => send_command(command),
+        ["toggle", ref app @ ..] if !app.is_empty() => {
+            send_command(&format!("toggle {}", app.join(" ")))
+        }
         ["-h" | "--help" | "help"] => {
             print!("{USAGE}");
             Ok(())

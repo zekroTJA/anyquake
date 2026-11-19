@@ -1,8 +1,9 @@
 // anyquake KWin script (generated, do not edit).
 //
-// Runs inside KWin. Owns the global shortcut and shows / hides / places the
-// target window. Talks back to the anyquake daemon over D-Bus to start the
-// application and to persist the identity of the managed window.
+// Runs inside KWin. Owns one global shortcut per configured application and
+// shows / hides / places its window. Talks back to the anyquake daemon over
+// D-Bus to start applications and to persist the identity of the managed
+// windows.
 
 const CONFIG = __ANYQUAKE_CONFIG__;
 
@@ -11,59 +12,65 @@ const DBUS_PATH = "/de/anyquake/Daemon";
 const DBUS_IFACE = "de.anyquake.Daemon";
 const LAUNCH_TIMEOUT_MS = 30000;
 
-let managed = null;
-let launchRequestedAt = 0;
-let knownBeforeLaunch = [];
+// Runtime state per application (same order as CONFIG.apps).
+const apps = CONFIG.apps.map(function (config) {
+    return { config: config, managed: null, launchRequestedAt: 0, knownBeforeLaunch: [] };
+});
 
 function lower(v) {
     return v ? String(v).toLowerCase() : "";
 }
 
-function matches(w) {
+function matches(app, w) {
     if (!w || !w.normalWindow) {
         return false;
     }
-    const m = CONFIG.match;
+    const m = app.config.match;
     return lower(w.resourceClass) === m || lower(w.resourceName) === m || lower(w.desktopFileName) === m;
 }
 
-function setManaged(w) {
-    managed = w;
-    callDBus(DBUS_SERVICE, DBUS_PATH, DBUS_IFACE, "SetManaged", String(w.internalId));
+function managedByOther(app, w) {
+    return apps.some(function (other) {
+        return other !== app && other.managed === w;
+    });
 }
 
-function findWindow() {
-    if (managed) {
-        return managed;
+function setManaged(app, w) {
+    app.managed = w;
+    callDBus(DBUS_SERVICE, DBUS_PATH, DBUS_IFACE, "SetManagedApp", app.config.index, String(w.internalId));
+}
+
+function findWindow(app) {
+    if (app.managed) {
+        return app.managed;
     }
-    const windows = workspace.windowList();
-    if (CONFIG.managedId) {
+    const windows = workspace.windowList().filter(function (w) {
+        return matches(app, w) && !managedByOther(app, w);
+    });
+    if (app.config.managedId) {
         for (const w of windows) {
-            if (String(w.internalId) === CONFIG.managedId && matches(w)) {
-                setManaged(w);
+            if (String(w.internalId) === app.config.managedId) {
+                setManaged(app, w);
                 return w;
             }
         }
     }
-    if (CONFIG.reuseExisting) {
-        for (const w of windows) {
-            if (matches(w)) {
-                setManaged(w);
-                return w;
-            }
-        }
+    if (app.config.reuseExisting && windows.length > 0) {
+        setManaged(app, windows[0]);
+        return windows[0];
     }
     return null;
 }
 
-function targetOutput() {
+function targetOutput(app) {
     const screens = workspace.screens;
-    if (CONFIG.monitor === "primary") {
+    const monitor = app.config.monitor;
+    if (monitor === "primary") {
         return screens[0];
     }
-    if (CONFIG.monitor !== "cursor") {
+    if (monitor !== "cursor") {
         for (const s of screens) {
-            if (lower(s.name) === lower(CONFIG.monitor)) {
+            if (lower(s.name) === lower(monitor)) {
                 return s;
             }
         }
@@ -80,10 +87,10 @@ function outputByName(name) {
     return null;
 }
 
-function computeRect(area) {
+function computeRect(config, area) {
     const pct = v => Math.min(Math.max(v, 1), 100) / 100;
-    const w = Math.max(1, Math.round(area.width * pct(CONFIG.width)));
-    const h = Math.max(1, Math.round(area.height * pct(CONFIG.height)));
+    const w = Math.max(1, Math.round(area.width * pct(config.width)));
+    const h = Math.max(1, Math.round(area.height * pct(config.height)));
     const left = area.x;
     const right = area.x + area.width - w;
     const hcenter = area.x + Math.floor((area.width - w) / 2);
@@ -100,12 +107,13 @@ function computeRect(area) {
         "top-right": [right, top],
         "bottom-left": [left, bottom],
         "bottom-right": [right, bottom],
-    }[CONFIG.anchor] || [hcenter, top];
+    }[config.anchor] || [hcenter, top];
     return { x: pos[0], y: pos[1], width: w, height: h };
 }
 
-function place(w, output) {
-    if (CONFIG.anchor === "fullscreen") {
+function place(app, w, output) {
+    const config = app.config;
+    if (config.anchor === "fullscreen") {
         w.frameGeometry = output.geometry;
         w.fullScreen = true;
         return;
@@ -116,21 +124,21 @@ function place(w, output) {
     if (w.maximizable) {
         w.setMaximize(false, false);
     }
-    const area = CONFIG.respectPanels
+    const area = config.respectPanels
         ? workspace.clientArea(KWin.MaximizeArea, output, workspace.currentDesktop)
         : output.geometry;
-    w.frameGeometry = computeRect(area);
+    w.frameGeometry = computeRect(config, area);
 }
 
-function show(w) {
-    const output = targetOutput();
+function show(app, w) {
+    const output = targetOutput(app);
     w.minimized = false;
     w.onAllDesktops = true;
     w.skipTaskbar = true;
     w.skipPager = true;
     w.skipSwitcher = true;
-    w.keepAbove = CONFIG.alwaysOnTop;
-    place(w, output);
+    w.keepAbove = app.config.alwaysOnTop;
+    place(app, w, output);
     workspace.activeWindow = w;
 }
 
@@ -138,72 +146,87 @@ function hide(w) {
     w.minimized = true;
 }
 
-function toggle() {
-    if (launchRequestedAt && Date.now() - launchRequestedAt < LAUNCH_TIMEOUT_MS) {
+function toggle(app) {
+    if (app.launchRequestedAt && Date.now() - app.launchRequestedAt < LAUNCH_TIMEOUT_MS) {
         return; // still waiting for the application to start
     }
-    const w = findWindow();
+    const w = findWindow(app);
     if (!w) {
-        knownBeforeLaunch = workspace.windowList().filter(matches);
-        launchRequestedAt = Date.now();
-        callDBus(DBUS_SERVICE, DBUS_PATH, DBUS_IFACE, "Launch");
+        app.knownBeforeLaunch = workspace.windowList().filter(function (w) {
+            return matches(app, w);
+        });
+        app.launchRequestedAt = Date.now();
+        callDBus(DBUS_SERVICE, DBUS_PATH, DBUS_IFACE, "LaunchApp", app.config.index);
         return;
     }
-    const onTarget = w.output && w.output.name === targetOutput().name;
+    const onTarget = w.output && w.output.name === targetOutput(app).name;
     if (!w.minimized && workspace.activeWindow === w && onTarget) {
         hide(w);
     } else {
-        show(w);
+        show(app, w);
     }
 }
 
 function release() {
-    const w = managed;
-    if (!w) {
-        return;
+    for (const app of apps) {
+        const w = app.managed;
+        if (!w) {
+            continue;
+        }
+        w.skipTaskbar = false;
+        w.skipPager = false;
+        w.skipSwitcher = false;
+        w.keepAbove = false;
+        w.onAllDesktops = false;
+        app.managed = null;
     }
-    w.skipTaskbar = false;
-    w.skipPager = false;
-    w.skipSwitcher = false;
-    w.keepAbove = false;
-    w.onAllDesktops = false;
-    managed = null;
 }
 
 workspace.windowAdded.connect(function (w) {
-    if (!launchRequestedAt) {
+    for (const app of apps) {
+        if (!app.launchRequestedAt) {
+            continue;
+        }
+        if (Date.now() - app.launchRequestedAt > LAUNCH_TIMEOUT_MS) {
+            app.launchRequestedAt = 0;
+            continue;
+        }
+        if (!matches(app, w) || app.knownBeforeLaunch.indexOf(w) >= 0 || managedByOther(app, w)) {
+            continue;
+        }
+        app.launchRequestedAt = 0;
+        app.knownBeforeLaunch = [];
+        setManaged(app, w);
+        show(app, w);
         return;
     }
-    if (Date.now() - launchRequestedAt > LAUNCH_TIMEOUT_MS) {
-        launchRequestedAt = 0;
-        return;
-    }
-    if (!matches(w) || knownBeforeLaunch.indexOf(w) >= 0) {
-        return;
-    }
-    launchRequestedAt = 0;
-    knownBeforeLaunch = [];
-    setManaged(w);
-    show(w);
 });
 
 workspace.windowRemoved.connect(function (w) {
-    if (w === managed) {
-        managed = null;
+    for (const app of apps) {
+        if (w === app.managed) {
+            app.managed = null;
+        }
     }
 });
 
 function screensChanged() {
-    const w = managed;
-    if (!w || w.minimized) {
-        return;
+    for (const app of apps) {
+        const w = app.managed;
+        if (!w || w.minimized) {
+            continue;
+        }
+        const output = (w.output && outputByName(w.output.name)) || targetOutput(app);
+        place(app, w, output);
     }
-    const output = (w.output && outputByName(w.output.name)) || targetOutput();
-    place(w, output);
 }
 
 workspace.screensChanged.connect(screensChanged);
 workspace.virtualScreenGeometryChanged.connect(screensChanged);
 
-registerShortcut(CONFIG.shortcutName, CONFIG.shortcutText, CONFIG.hotkey, toggle);
+for (const app of apps) {
+    registerShortcut(app.config.shortcutName, app.config.shortcutText, app.config.hotkey, function () {
+        toggle(app);
+    });
+}
 registerShortcut(CONFIG.releaseShortcutName, CONFIG.releaseShortcutText, "", release);

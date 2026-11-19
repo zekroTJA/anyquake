@@ -1,31 +1,44 @@
 //! Small runtime state that survives restarts of the daemon: the identity of
-//! the window anyquake manages, so a restarted daemon picks up the same
-//! (possibly hidden) window again instead of starting a second instance.
+//! the windows anyquake manages, so a restarted daemon picks up the same
+//! (possibly hidden) windows again instead of starting second instances.
 
 use crate::config::APP_NAME;
 use std::fs;
 use std::path::PathBuf;
 
-fn path(backend: &str) -> Option<PathBuf> {
+/// One file per backend and application. The first application uses the
+/// file name of AnyQuake 0.5 and older, which only had one.
+fn path(backend: &str, app: usize) -> Option<PathBuf> {
     let dir = dirs::cache_dir()?.join(APP_NAME);
-    Some(dir.join(format!(
-        "managed-window-{}",
-        backend.to_lowercase().replace(' ', "-")
-    )))
+    let backend = backend.to_lowercase().replace(' ', "-");
+    let name = match app {
+        0 => format!("managed-window-{backend}"),
+        n => format!("managed-window-{backend}-{}", n + 1),
+    };
+    Some(dir.join(name))
 }
 
-pub fn load_managed_window(backend: &str) -> Option<String> {
-    let text = fs::read_to_string(path(backend)?).ok()?;
-    let id = text.trim();
-    (!id.is_empty()).then(|| id.to_owned())
+/// The saved window id of application `app`, if it was saved for the same
+/// window match (the list of applications may have been changed since).
+pub fn load_managed_window(backend: &str, app: usize, matcher: &str) -> Option<String> {
+    let text = fs::read_to_string(path(backend, app)?).ok()?;
+    let mut lines = text.lines().map(str::trim);
+    let id = lines.next().filter(|id| !id.is_empty())?;
+    // Files written by older versions have no match line.
+    match lines.next() {
+        Some(saved) if saved != matcher => None,
+        _ => Some(id.to_owned()),
+    }
 }
 
-pub fn save_managed_window(backend: &str, id: &str) {
-    let Some(path) = path(backend) else { return };
+pub fn save_managed_window(backend: &str, app: usize, matcher: &str, id: &str) {
+    let Some(path) = path(backend, app) else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    if let Err(e) = fs::write(&path, id) {
+    if let Err(e) = fs::write(&path, format!("{id}\n{matcher}\n")) {
         log::warn!("saving {}: {e}", path.display());
     }
 }

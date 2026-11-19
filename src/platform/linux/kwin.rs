@@ -2,9 +2,9 @@
 //!
 //! Wayland does not allow normal clients to grab global keys or move other
 //! applications' windows, so the actual work happens in a KWin script that
-//! anyquake generates and loads via D-Bus. The script registers the global
-//! shortcut and calls back into this process over D-Bus to start the
-//! application.
+//! anyquake generates and loads via D-Bus. The script registers a global
+//! shortcut per application and calls back into this process over D-Bus to
+//! start the application.
 
 use crate::config::{APP_NAME, Config};
 use crate::daemon::{Backend, Event};
@@ -21,8 +21,8 @@ const NAME: &str = "KWin";
 const SCRIPT_NAME: &str = "anyquake";
 const SCRIPT_SOURCE: &str = include_str!("kwin.js");
 
+/// Prefix of the toggle shortcuts' names, see [`shortcut_name`].
 const SHORTCUT: &str = "anyquake-toggle";
-const SHORTCUT_TEXT: &str = "AnyQuake: Toggle window";
 const RELEASE_SHORTCUT: &str = "anyquake-release";
 const RELEASE_SHORTCUT_TEXT: &str = "AnyQuake: Release window (internal)";
 
@@ -136,28 +136,67 @@ impl KWin {
         Ok(())
     }
 
-    /// KDE remembers shortcuts registered by scripts and ignores the default
-    /// passed by the script once a shortcut was saved. Force the configured
-    /// key so changes in anyquake's settings take effect.
-    fn assign_hotkey(&self, hotkey: &Hotkey) -> Result<()> {
-        let action = vec!["kwin", SHORTCUT, "KWin", SHORTCUT_TEXT];
-        let keys = vec![(vec![hotkey.qt_combination(), 0, 0, 0],)];
-        self.kglobalaccel("setForeignShortcutKeys", &(&action, keys))?;
+    /// Removes toggle shortcuts of applications that are no longer
+    /// configured. KDE keeps them (and their keys) otherwise.
+    fn remove_stale_shortcuts(&self, current: &[String]) -> Result<()> {
+        let actions: Vec<Vec<String>> = self
+            .kglobalaccel("allActionsForComponent", &(vec!["kwin"],))?
+            .body()
+            .deserialize()?;
+        for action in actions {
+            let Some(name) = action.get(1) else { continue };
+            if name.starts_with(SHORTCUT) && !current.contains(name) {
+                log::debug!("removing stale shortcut {name}");
+                self.kglobalaccel("unregister", &("kwin", name.as_str()))?;
+            }
+        }
+        Ok(())
+    }
 
+    fn set_shortcut_keys(&self, name: &str, text: &str, keys: Option<i32>) -> Result<Vec<i32>> {
+        let action = vec!["kwin", name, "KWin", text];
+        let keys: Vec<(Vec<i32>,)> = keys.map(|k| (vec![k, 0, 0, 0],)).into_iter().collect();
+        self.kglobalaccel("setForeignShortcutKeys", &(&action, keys))?;
         let assigned: Vec<(Vec<i32>,)> = self
             .kglobalaccel("shortcutKeys", &(&action,))?
             .body()
             .deserialize()?;
-        if !assigned
-            .iter()
-            .any(|(k,)| k.first() == Some(&hotkey.qt_combination()))
-        {
-            log::warn!(
-                "KDE did not accept the hotkey {hotkey}; it is probably used by another \
-                 shortcut. Free it in System Settings → Keyboard → Shortcuts."
-            );
+        Ok(assigned
+            .into_iter()
+            .filter_map(|(k,)| k.first().copied())
+            .collect())
+    }
+
+    /// KDE remembers shortcuts registered by scripts and ignores the default
+    /// passed by the script once a shortcut was saved. Force the configured
+    /// keys so changes in anyquake's settings take effect.
+    fn assign_hotkeys(&self, shortcuts: &[(String, String, &Hotkey)]) -> Result<()> {
+        // Clear all keys first, so applications can swap hotkeys.
+        for (name, text, _) in shortcuts {
+            self.set_shortcut_keys(name, text, None)?;
+        }
+        for (name, text, hotkey) in shortcuts {
+            let wanted = hotkey.qt_combination();
+            if !self
+                .set_shortcut_keys(name, text, Some(wanted))?
+                .contains(&wanted)
+            {
+                log::warn!(
+                    "KDE did not accept the hotkey {hotkey}; it is probably used by another \
+                     shortcut. Free it in System Settings → Keyboard → Shortcuts."
+                );
+            }
         }
         Ok(())
+    }
+}
+
+/// Name of the toggle shortcut of application `index`. The first one keeps
+/// the name used by AnyQuake 0.5 and older.
+fn shortcut_name(index: usize) -> String {
+    match index {
+        0 => SHORTCUT.to_owned(),
+        n => format!("{SHORTCUT}-{}", n + 1),
     }
 }
 
@@ -167,34 +206,52 @@ impl Backend for KWin {
     }
 
     fn configure(&mut self, config: &Config) -> Result<()> {
-        let p = &config.placement;
+        let shortcuts: Vec<_> = config
+            .apps
+            .iter()
+            .enumerate()
+            .map(|(i, app)| {
+                let text = format!("AnyQuake: Toggle {}", app.label(i));
+                (shortcut_name(i), text, &app.hotkey)
+            })
+            .collect();
+        let apps: Vec<_> = config
+            .apps
+            .iter()
+            .zip(&shortcuts)
+            .enumerate()
+            .map(|(i, (app, (name, text, _)))| {
+                let mut json = super::app_json(NAME, i, app);
+                json["hotkey"] = app.hotkey.qt_string().into();
+                json["shortcutName"] = name.as_str().into();
+                json["shortcutText"] = text.as_str().into();
+                json
+            })
+            .collect();
         let script_config = json!({
-            "match": config.target.effective_match(),
-            "reuseExisting": config.target.reuse_existing,
-            "managedId": crate::state::load_managed_window(NAME).unwrap_or_default(),
-            "monitor": String::from(p.monitor.clone()),
-            "anchor": p.anchor.id(),
-            "width": p.width,
-            "height": p.height,
-            "respectPanels": p.respect_panels,
-            "alwaysOnTop": p.always_on_top,
-            "hotkey": config.general.hotkey.qt_string(),
-            "shortcutName": SHORTCUT,
-            "shortcutText": SHORTCUT_TEXT,
+            "apps": apps,
             "releaseShortcutName": RELEASE_SHORTCUT,
             "releaseShortcutText": RELEASE_SHORTCUT_TEXT,
         });
         let source = SCRIPT_SOURCE.replace("__ANYQUAKE_CONFIG__", &script_config.to_string());
         self.load_script(&source)?;
-        self.assign_hotkey(&config.general.hotkey)?;
-        log::info!("KWin script loaded, hotkey {}", config.general.hotkey);
+        let names: Vec<_> = shortcuts.iter().map(|(name, ..)| name.clone()).collect();
+        if let Err(e) = self.remove_stale_shortcuts(&names) {
+            log::warn!("removing old shortcuts: {e:#}");
+        }
+        self.assign_hotkeys(&shortcuts)?;
+        let hotkeys: Vec<_> = config
+            .apps
+            .iter()
+            .map(|app| app.hotkey.to_string())
+            .collect();
+        log::info!("KWin script loaded, hotkeys {}", hotkeys.join(", "));
         Ok(())
     }
 
-    fn toggle(&mut self) -> Result<()> {
-        self.invoke_shortcut(SHORTCUT)
+    fn toggle(&mut self, app: usize) -> Result<()> {
+        self.invoke_shortcut(&shortcut_name(app))
     }
-
     fn release(&mut self) {
         if let Err(e) = self.invoke_shortcut(RELEASE_SHORTCUT) {
             log::warn!("releasing window: {e:#}");

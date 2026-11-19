@@ -113,7 +113,9 @@ pub static KEYS: &[KeyDef] = keys! {
     "9" => 0x0039, 0x39, "Digit9";
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Stored as its string form, e.g. `Ctrl+Alt+T`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct Hotkey {
     pub ctrl: bool,
     pub alt: bool,
@@ -141,6 +143,11 @@ impl Default for Hotkey {
             key: find_key("F12").expect("F12 is a known key"),
         }
     }
+}
+
+/// The function keys F12 down to F1, used as defaults for new applications.
+pub fn function_keys() -> impl Iterator<Item = Hotkey> {
+    (1..=12).rev().filter_map(|n| format!("F{n}").parse().ok())
 }
 
 pub fn find_key(name: &str) -> Option<&'static KeyDef> {

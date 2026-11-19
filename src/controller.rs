@@ -48,7 +48,8 @@ pub trait WindowOps {
 
     fn name(&self) -> &'static str;
 
-    /// Called whenever the configuration changes (e.g. to grab the hotkey).
+    /// Called whenever the configuration changes (e.g. to grab the hotkeys,
+    /// which then send [`Event::Toggle`] with the application's index).
     fn configure(&mut self, _config: &Config) -> Result<()> {
         Ok(())
     }
@@ -95,106 +96,68 @@ struct PendingLaunch {
     known: HashSet<String>,
 }
 
-pub struct Controller<O: WindowOps> {
-    ops: O,
-    events: Sender<Event>,
+/// Runtime state of one configured application.
+struct AppState<W> {
     matcher: String,
     reuse_existing: bool,
     placement: Placement,
-    managed: Option<O::Window>,
+    managed: Option<W>,
     pending: Option<PendingLaunch>,
+}
+
+pub struct Controller<O: WindowOps> {
+    ops: O,
+    events: Sender<Event>,
+    apps: Vec<AppState<O::Window>>,
     last_monitors: Option<Vec<Monitor>>,
 }
 
 impl<O: WindowOps> Controller<O> {
     pub fn new(ops: O, events: Sender<Event>) -> Self {
-        let managed =
-            crate::state::load_managed_window(ops.name()).and_then(|id| ops.window_from_id(&id));
         Self {
             ops,
             events,
-            matcher: String::new(),
-            reuse_existing: true,
-            placement: Placement::default(),
-            managed,
-            pending: None,
+            apps: Vec::new(),
             last_monitors: None,
         }
     }
 
-    fn set_managed(&mut self, window: O::Window) {
-        if self.managed != Some(window) {
-            self.managed = Some(window);
-            let _ = self
-                .events
-                .send(Event::Managed(self.ops.window_to_id(window)));
+    fn set_managed(&mut self, app: usize, window: O::Window) {
+        if self.apps[app].managed != Some(window) {
+            self.apps[app].managed = Some(window);
+            let id = self.ops.window_to_id(window);
+            let _ = self.events.send(Event::Managed(app, id));
         }
     }
 
-    /// The managed window, adopting an existing one if allowed.
-    fn current_window(&mut self) -> Result<Option<O::Window>> {
-        if let Some(window) = self.managed {
-            if self.ops.is_valid(window, &self.matcher) {
+    /// Whether another application than `app` manages `window`.
+    fn managed_by_other(&self, app: usize, window: O::Window) -> bool {
+        self.apps
+            .iter()
+            .enumerate()
+            .any(|(i, other)| i != app && other.managed == Some(window))
+    }
+
+    /// The managed window of `app`, adopting an existing one if allowed.
+    fn current_window(&mut self, app: usize) -> Result<Option<O::Window>> {
+        if let Some(window) = self.apps[app].managed {
+            if self.ops.is_valid(window, &self.apps[app].matcher) {
                 return Ok(Some(window));
             }
-            self.managed = None;
+            self.apps[app].managed = None;
         }
-        if !self.reuse_existing {
+        if !self.apps[app].reuse_existing {
             return Ok(None);
         }
-        let found = self.ops.find_all(&self.matcher)?.into_iter().next();
+        let found = self
+            .ops
+            .find_all(&self.apps[app].matcher)?
+            .into_iter()
+            .find(|&w| !self.managed_by_other(app, w));
         if let Some(window) = found {
-            self.set_managed(window);
+            self.set_managed(app, window);
         }
         Ok(found)
-    }
-
-    fn select_monitor(&mut self, monitors: &[Monitor], current: Option<&str>) -> Result<Monitor> {
-        anyhow::ensure!(!monitors.is_empty(), "no monitors found");
-        let by_name = |name: &str| {
-            monitors
-                .iter()
-                .find(|m| m.name.eq_ignore_ascii_case(name))
-                .cloned()
-        };
-        if let Some(monitor) = current.and_then(by_name) {
-            return Ok(monitor);
-        }
-        let primary = || {
-            monitors
-                .iter()
-                .find(|m| m.primary)
-                .unwrap_or(&monitors[0])
-                .clone()
-        };
-        let at_cursor = |ops: &mut O| -> Result<Monitor> {
-            let (x, y) = ops.cursor_position()?;
-            Ok(monitors
-                .iter()
-                .find(|m| m.full.contains(x, y))
-                .cloned()
-                .unwrap_or_else(primary))
-        };
-        match &self.placement.monitor {
-            MonitorChoice::Cursor => at_cursor(&mut self.ops),
-            MonitorChoice::Primary => Ok(primary()),
-            MonitorChoice::Named(name) => match by_name(name) {
-                Some(monitor) => Ok(monitor),
-                None => at_cursor(&mut self.ops),
-            },
-        }
-    }
-
-    fn params_for(&self, monitor: &Monitor, activate: bool) -> ShowParams {
-        let p = &self.placement;
-        let fullscreen = p.anchor == Anchor::Fullscreen;
-        let area = if p.respect_panels && !fullscreen { monitor.work } else { monitor.full };
-        ShowParams {
-            rect: geometry::place(area, p.anchor, p.width, p.height),
-            fullscreen,
-            always_on_top: p.always_on_top,
-            activate,
-        }
     }
 
     /// Monitor the window is currently on (by its center).
@@ -203,10 +166,11 @@ impl<O: WindowOps> Controller<O> {
         monitors.iter().find(|m| m.full.contains(x, y)).cloned()
     }
 
-    fn show(&mut self, window: O::Window) -> Result<()> {
+    fn show(&mut self, app: usize, window: O::Window) -> Result<()> {
         let monitors = self.ops.monitors()?;
-        let monitor = self.select_monitor(&monitors, None)?;
-        let params = self.params_for(&monitor, true);
+        let placement = &self.apps[app].placement;
+        let monitor = select_monitor(&mut self.ops, placement, &monitors, None)?;
+        let params = params_for(placement, &monitor, true);
         log::debug!(
             "showing {window:?} on {} at {:?}",
             monitor.name,
@@ -215,19 +179,125 @@ impl<O: WindowOps> Controller<O> {
         self.ops.show(window, params)
     }
 
-    fn start_launch(&mut self) -> Result<()> {
+    fn start_launch(&mut self, app: usize) -> Result<()> {
         let known = self
             .ops
-            .find_all(&self.matcher)?
+            .find_all(&self.apps[app].matcher)?
             .into_iter()
             .map(|w| self.ops.window_to_id(w))
             .collect();
-        self.pending = Some(PendingLaunch {
+        self.apps[app].pending = Some(PendingLaunch {
             since: Instant::now(),
             known,
         });
-        let _ = self.events.send(Event::Launch);
+        let _ = self.events.send(Event::Launch(app));
         Ok(())
+    }
+
+    /// Looks for the window of an application started by
+    /// [`Self::start_launch`].
+    fn check_launch(&mut self, app: usize) -> Result<()> {
+        let Some(pending) = &self.apps[app].pending else {
+            return Ok(());
+        };
+        if pending.since.elapsed() > LAUNCH_TIMEOUT {
+            self.apps[app].pending = None;
+            anyhow::bail!(
+                "no window matching '{}' appeared after starting the application; check the \
+                 'window match' setting",
+                self.apps[app].matcher
+            );
+        }
+        let candidates = self.ops.find_all(&self.apps[app].matcher)?;
+        let new = candidates.into_iter().find(|&w| {
+            !pending.known.contains(&self.ops.window_to_id(w)) && !self.managed_by_other(app, w)
+        });
+        if let Some(window) = new {
+            self.apps[app].pending = None;
+            self.set_managed(app, window);
+            self.show(app, window)?;
+        }
+        Ok(())
+    }
+
+    /// Re-applies the placement of `app`'s window if it is shown.
+    fn replace_window(&mut self, app: usize) -> Result<()> {
+        let Some(window) = self.apps[app].managed else {
+            return Ok(());
+        };
+        if !self.ops.is_valid(window, &self.apps[app].matcher) || !self.ops.is_shown(window)? {
+            return Ok(());
+        }
+        let monitors = self.ops.monitors()?;
+        let current = self.monitor_of(window, &monitors).map(|m| m.name);
+        let placement = &self.apps[app].placement;
+        let monitor = select_monitor(&mut self.ops, placement, &monitors, current.as_deref())?;
+        let params = params_for(placement, &monitor, false);
+        self.ops.show(window, params)
+    }
+}
+
+fn select_monitor<O: WindowOps>(
+    ops: &mut O,
+    placement: &Placement,
+    monitors: &[Monitor],
+    current: Option<&str>,
+) -> Result<Monitor> {
+    anyhow::ensure!(!monitors.is_empty(), "no monitors found");
+    let by_name = |name: &str| {
+        monitors
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(name))
+            .cloned()
+    };
+    if let Some(monitor) = current.and_then(by_name) {
+        return Ok(monitor);
+    }
+    let primary = || {
+        monitors
+            .iter()
+            .find(|m| m.primary)
+            .unwrap_or(&monitors[0])
+            .clone()
+    };
+    let at_cursor = |ops: &mut O| -> Result<Monitor> {
+        let (x, y) = ops.cursor_position()?;
+        Ok(monitors
+            .iter()
+            .find(|m| m.full.contains(x, y))
+            .cloned()
+            .unwrap_or_else(primary))
+    };
+    match &placement.monitor {
+        MonitorChoice::Cursor => at_cursor(ops),
+        MonitorChoice::Primary => Ok(primary()),
+        MonitorChoice::Named(name) => match by_name(name) {
+            Some(monitor) => Ok(monitor),
+            None => at_cursor(ops),
+        },
+    }
+}
+
+fn params_for(p: &Placement, monitor: &Monitor, activate: bool) -> ShowParams {
+    let fullscreen = p.anchor == Anchor::Fullscreen;
+    let area = if p.respect_panels && !fullscreen { monitor.work } else { monitor.full };
+    ShowParams {
+        rect: geometry::place(area, p.anchor, p.width, p.height),
+        fullscreen,
+        always_on_top: p.always_on_top,
+        activate,
+    }
+}
+
+/// Combines several errors into one.
+fn combine(errors: Vec<anyhow::Error>) -> Result<()> {
+    match errors.len() {
+        0 => Ok(()),
+        1 => Err(errors.into_iter().next().unwrap()),
+        _ => {
+            let messages: Vec<_> = errors.iter().map(|e| format!("{e:#}")).collect();
+            anyhow::bail!("{}", messages.join("; "))
+        }
     }
 }
 
@@ -237,57 +307,73 @@ impl<O: WindowOps> Backend for Controller<O> {
     }
 
     fn configure(&mut self, config: &Config) -> Result<()> {
-        let matcher = config.target.effective_match();
-        if matcher != self.matcher && !self.matcher.is_empty() {
-            // A different application was configured.
-            if let Some(window) = self.managed.take() {
+        let mut old = std::mem::take(&mut self.apps).into_iter();
+        for (i, app) in config.apps.iter().enumerate() {
+            let matcher = app.target.effective_match();
+            let (managed, pending) = match old.next() {
+                Some(prev) if prev.matcher == matcher => (prev.managed, prev.pending),
+                prev => {
+                    // A different application was configured at this position
+                    // (or it is new): give the old window back.
+                    if let Some(window) = prev.and_then(|p| p.managed) {
+                        self.ops.release(window);
+                    }
+                    let saved = crate::state::load_managed_window(self.ops.name(), i, &matcher);
+                    (saved.and_then(|id| self.ops.window_from_id(&id)), None)
+                }
+            };
+            self.apps.push(AppState {
+                matcher,
+                reuse_existing: app.target.reuse_existing,
+                placement: app.placement.clone(),
+                managed,
+                pending,
+            });
+        }
+        // Applications that were removed.
+        for prev in old {
+            if let Some(window) = prev.managed
+                && self.ops.is_valid(window, &prev.matcher)
+            {
                 self.ops.release(window);
             }
         }
-        self.matcher = matcher;
-        self.reuse_existing = config.target.reuse_existing;
-        self.placement = config.placement.clone();
         self.ops.configure(config)
     }
 
-    fn toggle(&mut self) -> Result<()> {
-        if self.pending.is_some() {
+    fn toggle(&mut self, app: usize) -> Result<()> {
+        anyhow::ensure!(app < self.apps.len(), "unknown application {}", app + 1);
+        if self.apps[app].pending.is_some() {
             log::debug!("still waiting for the application to start");
             return Ok(());
         }
-        let Some(window) = self.current_window()? else {
-            return self.start_launch();
+        let Some(window) = self.current_window(app)? else {
+            return self.start_launch(app);
         };
 
         if self.ops.is_shown(window)? && self.ops.is_active(window)? {
             // Visible and focused: hide it, unless it is on another screen
             // than the one it should appear on - then move it over.
             let monitors = self.ops.monitors()?;
-            let target = self.select_monitor(&monitors, None)?;
+            let placement = &self.apps[app].placement;
+            let target = select_monitor(&mut self.ops, placement, &monitors, None)?;
             let current = self.monitor_of(window, &monitors);
             if current.is_none_or(|m| m.name == target.name) {
                 return self.ops.hide(window);
             }
         }
-        self.show(window)
+        self.show(app, window)
     }
 
     fn screens_changed(&mut self) -> Result<()> {
-        let Some(window) = self.managed else {
-            return Ok(());
-        };
-        if !self.ops.is_valid(window, &self.matcher) || !self.ops.is_shown(window)? {
-            return Ok(());
-        }
-        let monitors = self.ops.monitors()?;
-        let current = self.monitor_of(window, &monitors).map(|m| m.name);
-        let monitor = self.select_monitor(&monitors, current.as_deref())?;
-        let params = self.params_for(&monitor, false);
-        self.ops.show(window, params)
+        let errors = (0..self.apps.len())
+            .filter_map(|app| self.replace_window(app).err())
+            .collect();
+        combine(errors)
     }
 
     fn poll_interval(&self) -> Option<Duration> {
-        if self.pending.is_some() {
+        if self.apps.iter().any(|app| app.pending.is_some()) {
             Some(LAUNCH_POLL)
         } else if O::POLL_SCREENS {
             Some(SCREEN_POLL)
@@ -298,42 +384,30 @@ impl<O: WindowOps> Backend for Controller<O> {
 
     fn tick(&mut self) -> Result<()> {
         self.ops.poll();
-        let Some(pending) = &self.pending else {
-            if O::POLL_SCREENS {
-                let monitors = Some(self.ops.monitors()?);
-                if self.last_monitors.is_some() && self.last_monitors != monitors {
-                    log::info!("screen layout changed");
-                    self.screens_changed()?;
-                }
-                self.last_monitors = monitors;
-            }
-            return Ok(());
-        };
-        if pending.since.elapsed() > LAUNCH_TIMEOUT {
-            self.pending = None;
-            anyhow::bail!(
-                "no window matching '{}' appeared after starting the application; check the \
-                 'window match' setting",
-                self.matcher
-            );
+        if self.apps.iter().any(|app| app.pending.is_some()) {
+            let errors = (0..self.apps.len())
+                .filter_map(|app| self.check_launch(app).err())
+                .collect();
+            return combine(errors);
         }
-        let candidates = self.ops.find_all(&self.matcher)?;
-        let new = candidates
-            .into_iter()
-            .find(|w| !pending.known.contains(&self.ops.window_to_id(*w)));
-        if let Some(window) = new {
-            self.pending = None;
-            self.set_managed(window);
-            self.show(window)?;
+        if O::POLL_SCREENS {
+            let monitors = Some(self.ops.monitors()?);
+            if self.last_monitors.is_some() && self.last_monitors != monitors {
+                log::info!("screen layout changed");
+                self.screens_changed()?;
+            }
+            self.last_monitors = monitors;
         }
         Ok(())
     }
 
     fn release(&mut self) {
-        if let Some(window) = self.managed
-            && self.ops.is_valid(window, &self.matcher)
-        {
-            self.ops.release(window);
+        for app in &self.apps {
+            if let Some(window) = app.managed
+                && self.ops.is_valid(window, &app.matcher)
+            {
+                self.ops.release(window);
+            }
         }
     }
 }

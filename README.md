@@ -10,8 +10,9 @@ style - on _any_[\*](#platform-support) platform!
 
 ## Features
 
-- One hotkey toggles the configured application. It is started once on the
-  first toggle and only hidden and shown afterwards.
+- Configure any number of applications, each toggled with its own hotkey and
+  placed independently. An application is started once on its first toggle
+  and only hidden and shown afterwards.
 - The window gets keyboard focus when it is shown.
 - Placement (top, bottom, left, right, corners, center, fullscreen plus width
   and height in percent) is computed from the current screen geometry every
@@ -141,7 +142,8 @@ release.
 anyquake            start (opens settings; if already running only the settings)
 anyquake daemon     start in the background (used by autostart)
 anyquake settings   open the settings window
-anyquake toggle     show / hide the application (e.g. for custom shortcuts)
+anyquake toggle     show / hide the first application (e.g. for custom shortcuts)
+anyquake toggle APP show / hide an application by its name or number (1, 2, …)
 anyquake reload     re-read the configuration file
 anyquake quit       stop AnyQuake
 ```
@@ -160,10 +162,14 @@ Normally edited in the settings window; the file looks like this:
 
 ```toml
 [general]
-hotkey = "Ctrl+Backtick"   # modifiers: Ctrl, Alt, Shift, Super (= Meta/Win/Cmd)
 autostart = false
 
-[target]
+# One [[app]] block per application.
+[[app]]
+name = "Terminal"          # optional; shown in the tray menu, used by `anyquake toggle`
+hotkey = "Ctrl+Backtick"   # modifiers: Ctrl, Alt, Shift, Super (= Meta/Win/Cmd)
+
+[app.target]
 command = "kitty --class anyquake"
 # Window class / Wayland app id (Linux), executable name (Windows),
 # bundle id or app name (macOS). Defaults to the command's program name.
@@ -173,7 +179,7 @@ window_match = "anyquake"
 # only manages the instance it started itself.
 reuse_existing = true
 
-[placement]
+[app.placement]
 monitor = "cursor"      # "cursor", "primary" or a screen name such as "DP-2"
 anchor = "top"          # top, bottom, left, right, center, top-left,
                         # top-right, bottom-left, bottom-right, fullscreen
@@ -181,6 +187,12 @@ width = 100.0           # percent of the screen
 height = 50.0
 respect_panels = true   # don't cover panels / taskbar / menu bar
 always_on_top = true
+
+[[app]]
+hotkey = "F11"
+
+[app.target]
+command = "firefox"
 
 [debug]
 # Also write the log to anyquake.log in the cache directory
@@ -192,9 +204,9 @@ log_level = "info"      # error, warn, info, debug, trace (for the file only;
 
 ## Notes
 
-- **KDE:** the shortcut appears in System Settings → Keyboard → Shortcuts
-  under _KWin_ as "AnyQuake: Toggle window". AnyQuake enforces its configured
-  key on every start. If KDE refuses the key because another shortcut uses
+- **KDE:** the shortcuts appear in System Settings → Keyboard → Shortcuts
+  under _KWin_ as "AnyQuake: Toggle _name_". AnyQuake enforces its
+  configured keys on every start. If KDE refuses the key because another shortcut uses
   it, a warning is logged. Hiding uses minimize, so a desktop minimize
   animation effect (e.g. Magic Lamp) also applies here.
 - **GNOME (Wayland):** on its first start, AnyQuake installs its GNOME Shell
@@ -216,5 +228,11 @@ log_level = "info"      # error, warn, info, debug, trace (for the file only;
   running instance.
 - **Windows:** hidden windows disappear from the taskbar; shown ones stay
   in it.
-- The identity of the managed window is saved in the cache directory, so a
-  restarted AnyQuake picks up the same (possibly hidden) window again.
+- The identity of the managed windows is saved in the cache directory, so a
+  restarted AnyQuake picks up the same (possibly hidden) windows again.
+- Configuration files of AnyQuake 0.5 and older (`[target]`, `[placement]`
+  and `general.hotkey` for a single application) are still read and are
+  converted to the format above when saved from the settings window.
+- **GNOME:** after updating from AnyQuake 0.5, log out and back in once to
+  load the new version of the extension. Until then only the first
+  application can be toggled.

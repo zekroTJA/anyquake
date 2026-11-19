@@ -6,8 +6,8 @@ use crate::daemon::Event;
 use crate::geometry::Rect;
 use crate::hotkey::Hotkey;
 use anyhow::{Context, Result, bail};
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::properties::WmClass;
 use x11rb::protocol::Event as XEvent;
@@ -51,11 +51,36 @@ const SOURCE_PAGER: u32 = 2;
 const ICONIC_STATE: u32 = 3;
 const ALL_DESKTOPS: u32 = 0xFFFF_FFFF;
 
+/// A grabbed hotkey: key code, modifiers and index of the application.
+#[derive(Clone, Copy)]
+struct Grab {
+    keycode: Keycode,
+    mods: u16,
+    app: usize,
+}
+
+// Modifier bits (`ModMask`, whose conversions aren't usable in constants).
+const MOD_SHIFT: u16 = 1 << 0;
+const MOD_LOCK: u16 = 1 << 1;
+const MOD_CONTROL: u16 = 1 << 2;
+const MOD_ALT: u16 = 1 << 3;
+const MOD_NUM_LOCK: u16 = 1 << 4;
+const MOD_SUPER: u16 = 1 << 6;
+
+/// Modifiers that are part of a hotkey (NumLock, CapsLock and mouse buttons
+/// are ignored).
+const HOTKEY_MODS: u16 = MOD_SHIFT | MOD_CONTROL | MOD_ALT | MOD_SUPER;
+
+/// NumLock and CapsLock combinations grabbed in addition, otherwise a hotkey
+/// does not work while one of them is active.
+const LOCK_MODS: [u16; 4] = [0, MOD_NUM_LOCK, MOD_LOCK, MOD_NUM_LOCK | MOD_LOCK];
+
 pub struct X11 {
     conn: Arc<RustConnection>,
     root: Window,
     atoms: Atoms,
-    grabbed: Option<Keycode>,
+    /// Shared with the event thread, which maps key presses to applications.
+    grabs: Arc<Mutex<Vec<Grab>>>,
 }
 
 impl X11 {
@@ -78,16 +103,18 @@ impl X11 {
         }
         conn.flush()?;
 
+        let grabs = Arc::new(Mutex::new(Vec::new()));
         let event_conn = conn.clone();
+        let event_grabs = grabs.clone();
         std::thread::Builder::new()
             .name("x11-events".into())
-            .spawn(move || event_loop(&event_conn, &events))?;
+            .spawn(move || event_loop(&event_conn, &events, &event_grabs))?;
 
         Ok(Self {
             conn,
             root,
             atoms,
-            grabbed: None,
+            grabs,
         })
     }
 
@@ -181,49 +208,73 @@ impl X11 {
             .with_context(|| format!("no key on the keyboard produces keysym {keysym:#x}"))
     }
 
-    fn grab(&mut self, hotkey: &Hotkey) -> Result<()> {
-        if let Some(keycode) = self.grabbed.take() {
-            self.conn.ungrab_key(keycode, self.root, ModMask::ANY)?;
+    /// Grabs the hotkeys of all applications, replacing earlier grabs.
+    fn grab_all(&mut self, hotkeys: &[&Hotkey]) -> Result<()> {
+        let old = std::mem::take(&mut *self.grabs.lock().unwrap());
+        for grab in old {
+            for extra in LOCK_MODS {
+                let _ =
+                    self.conn
+                        .ungrab_key(grab.keycode, self.root, ModMask::from(grab.mods | extra));
+            }
         }
+        let mut grabs: Vec<Grab> = Vec::new();
+        let mut errors = Vec::new();
+        for (app, hotkey) in hotkeys.iter().enumerate() {
+            match self.grab(hotkey, &grabs) {
+                Ok((keycode, mods)) => grabs.push(Grab { keycode, mods, app }),
+                Err(e) => errors.push(format!("{e:#}")),
+            }
+        }
+        self.conn.flush()?;
+        *self.grabs.lock().unwrap() = grabs;
+        if !errors.is_empty() {
+            bail!("{}", errors.join("; "));
+        }
+        Ok(())
+    }
+
+    fn grab(&self, hotkey: &Hotkey, existing: &[Grab]) -> Result<(Keycode, u16)> {
         let keycode = self.keycode_for(hotkey.key.keysym)?;
-        let mut mods = ModMask::from(0u16);
+        let mut mods = 0;
         if hotkey.shift {
-            mods |= ModMask::SHIFT;
+            mods |= MOD_SHIFT;
         }
         if hotkey.ctrl {
-            mods |= ModMask::CONTROL;
+            mods |= MOD_CONTROL;
         }
         if hotkey.alt {
-            mods |= ModMask::M1;
+            mods |= MOD_ALT;
         }
         if hotkey.super_key {
-            mods |= ModMask::M4;
+            mods |= MOD_SUPER;
         }
-        // Grab with every combination of NumLock (M2) and CapsLock (LOCK),
-        // otherwise the hotkey does not work while one of them is active.
-        for extra in [
-            0u16,
-            ModMask::M2.into(),
-            ModMask::LOCK.into(),
-            (ModMask::M2 | ModMask::LOCK).into(),
-        ] {
+        if existing
+            .iter()
+            .any(|g| g.keycode == keycode && g.mods == mods)
+        {
+            bail!("{hotkey} is used by more than one application");
+        }
+        for (i, extra) in LOCK_MODS.into_iter().enumerate() {
             let cookie = self.conn.grab_key(
                 false,
                 self.root,
-                mods | ModMask::from(extra),
+                ModMask::from(mods | extra),
                 keycode,
                 GrabMode::ASYNC,
                 GrabMode::ASYNC,
             )?;
             if let Err(e) = cookie.check() {
-                let _ = self.conn.ungrab_key(keycode, self.root, ModMask::ANY);
+                for extra in &LOCK_MODS[..i] {
+                    let _ = self
+                        .conn
+                        .ungrab_key(keycode, self.root, ModMask::from(mods | extra));
+                }
                 bail!("could not grab {hotkey}, it is probably used by another application ({e})");
             }
         }
-        self.conn.flush()?;
-        self.grabbed = Some(keycode);
         log::info!("grabbed hotkey {hotkey}");
-        Ok(())
+        Ok((keycode, mods))
     }
 
     fn absolute_geometry(&self, window: Window) -> Result<Rect> {
@@ -241,7 +292,7 @@ impl X11 {
     }
 }
 
-fn event_loop(conn: &RustConnection, events: &Sender<Event>) {
+fn event_loop(conn: &RustConnection, events: &Sender<Event>, grabs: &Mutex<Vec<Grab>>) {
     // Holding a key down makes X send Release+Press pairs with the same
     // timestamp. Those are filtered out so the window does not flicker.
     let mut last_release = None;
@@ -256,8 +307,18 @@ fn event_loop(conn: &RustConnection, events: &Sender<Event>) {
         };
         match event {
             XEvent::KeyPress(e) => {
-                if last_release != Some(e.time) {
-                    let _ = events.send(Event::Toggle);
+                if last_release == Some(e.time) {
+                    continue;
+                }
+                let mods = u16::from(e.state) & HOTKEY_MODS;
+                let app = grabs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|g| g.keycode == e.detail && g.mods == mods)
+                    .map(|g| g.app);
+                if let Some(app) = app {
+                    let _ = events.send(Event::Toggle(app));
                 }
             }
             XEvent::KeyRelease(e) => last_release = Some(e.time),
@@ -277,7 +338,8 @@ impl WindowOps for X11 {
     }
 
     fn configure(&mut self, config: &Config) -> Result<()> {
-        self.grab(&config.general.hotkey)
+        let hotkeys: Vec<_> = config.apps.iter().map(|app| &app.hotkey).collect();
+        self.grab_all(&hotkeys)
     }
 
     fn find_all(&mut self, matcher: &str) -> Result<Vec<Window>> {

@@ -4,7 +4,7 @@
 //! Requires the Accessibility permission (System Settings → Privacy &
 //! Security → Accessibility); macOS asks for it on first start.
 
-use super::desktop::HotkeyRegistration;
+use super::desktop::{HotkeyApps, HotkeyRegistration};
 use crate::config::Config;
 use crate::controller::{Monitor, ShowParams, WindowOps};
 use crate::geometry::Rect;
@@ -183,7 +183,7 @@ pub struct MacOS {
 }
 
 impl MacOS {
-    pub fn new() -> Result<Self> {
+    pub fn new(hotkey_apps: HotkeyApps) -> Result<Self> {
         let mtm = MainThreadMarker::new().context("the daemon must run on the main thread")?;
         // Ask for the Accessibility permission (shows the system prompt).
         let options = CFDictionary::from_CFType_pairs(&[(
@@ -199,7 +199,7 @@ impl MacOS {
             );
         }
         Ok(Self {
-            hotkey: HotkeyRegistration::new()?,
+            hotkey: HotkeyRegistration::new(hotkey_apps)?,
             mtm,
         })
     }
@@ -225,7 +225,8 @@ impl WindowOps for MacOS {
     }
 
     fn configure(&mut self, config: &Config) -> Result<()> {
-        self.hotkey.set(&config.general.hotkey)
+        let hotkeys: Vec<_> = config.apps.iter().map(|app| &app.hotkey).collect();
+        self.hotkey.set(&hotkeys)
     }
 
     /// Follow keyboard layout switches (Carbon hotkeys use physical keys).

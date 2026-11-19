@@ -1,9 +1,9 @@
 // AnyQuake GNOME Shell extension (installed by anyquake, do not edit).
 //
-// Runs inside GNOME Shell. Owns the global shortcut and shows / hides /
-// places the target window. The anyquake daemon configures it over D-Bus
-// and is called back to start the application and to persist the identity
-// of the managed window.
+// Runs inside GNOME Shell. Owns one global shortcut per configured
+// application and shows / hides / places its window. The anyquake daemon
+// configures it over D-Bus and is called back to start the applications and
+// to persist the identity of the managed windows.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -14,7 +14,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // Must match EXTENSION_VERSION in gnome.rs.
-const VERSION = 1;
+const VERSION = 2;
 
 const BUS_NAME = 'de.anyquake.GnomeShell';
 const OBJECT_PATH = '/de/anyquake/GnomeShell';
@@ -26,6 +26,9 @@ const IFACE = `
       <arg type="s" direction="out" name="warning"/>
     </method>
     <method name="Toggle"/>
+    <method name="ToggleApp">
+      <arg type="u" direction="in" name="app"/>
+    </method>
     <method name="Release"/>
     <property name="Version" type="u" access="read"/>
   </interface>
@@ -38,14 +41,213 @@ const DAEMON_IFACE = 'de.anyquake.Daemon';
 const LAUNCH_TIMEOUT_MS = 30000;
 const MONITORS_CHANGED_DELAY_MS = 250;
 
+// One configured application: its configuration as sent by the daemon and
+// the window managed for it.
+class App {
+    constructor(controller, config) {
+        this._controller = controller;
+        this.config = config;
+        this.action = Meta.KeyBindingAction.NONE;
+        this.managed = null;
+        this._managedUnmanagedId = 0;
+        this.launchRequestedAt = 0;
+        this.knownBeforeLaunch = [];
+    }
+
+    matches(window) {
+        if (!window || window.get_window_type() !== Meta.WindowType.NORMAL)
+            return false;
+        const app = Shell.WindowTracker.get_default().get_window_app(window);
+        const appId = app?.get_id()?.replace(/\.desktop$/, '');
+        const m = this.config.match;
+        return [
+            window.get_wm_class(),
+            window.get_wm_class_instance(),
+            window.get_gtk_application_id(),
+            window.get_sandboxed_app_id(),
+            appId,
+        ].some(v => v && v.toLowerCase() === m);
+    }
+
+    windows() {
+        return global.get_window_actors()
+            .map(actor => actor.get_meta_window())
+            .filter(window => window && this.matches(window));
+    }
+
+    setManaged(window, report = true) {
+        if (this.managed && this._managedUnmanagedId)
+            this.managed.disconnect(this._managedUnmanagedId);
+        this.managed = window;
+        this._managedUnmanagedId = 0;
+        if (!window)
+            return;
+        this._managedUnmanagedId = window.connect('unmanaged', () => {
+            if (this.managed === window) {
+                this.managed = null;
+                this._managedUnmanagedId = 0;
+            }
+        });
+        if (report) {
+            this._controller.callDaemon('SetManagedApp',
+                new GLib.Variant('(ss)', [this.config.index, String(window.get_id())]));
+        }
+    }
+
+    findWindow() {
+        if (this.managed)
+            return this.managed;
+        const windows = this.windows().filter(w => !this._controller.managedByOther(this, w));
+        let window = null;
+        if (this.config.managedId)
+            window = windows.find(w => String(w.get_id()) === this.config.managedId) ?? null;
+        if (!window && this.config.reuseExisting)
+            window = windows[0] ?? null;
+        if (window)
+            this.setManaged(window);
+        return window;
+    }
+
+    targetMonitor() {
+        const display = global.display;
+        const monitor = this.config.monitor;
+        if (monitor === 'primary')
+            return display.get_primary_monitor();
+        if (monitor !== 'cursor') {
+            const index = global.backend.get_monitor_manager().get_monitor_for_connector(monitor);
+            if (index >= 0)
+                return index;
+        }
+        return display.get_current_monitor();
+    }
+
+    _computeRect(area) {
+        const pct = v => Math.min(Math.max(v, 1), 100) / 100;
+        const w = Math.max(1, Math.round(area.width * pct(this.config.width)));
+        const h = Math.max(1, Math.round(area.height * pct(this.config.height)));
+        const left = area.x;
+        const right = area.x + area.width - w;
+        const hcenter = area.x + Math.floor((area.width - w) / 2);
+        const top = area.y;
+        const bottom = area.y + area.height - h;
+        const vcenter = area.y + Math.floor((area.height - h) / 2);
+        const [x, y] = {
+            'top': [hcenter, top],
+            'bottom': [hcenter, bottom],
+            'left': [left, vcenter],
+            'right': [right, vcenter],
+            'center': [hcenter, vcenter],
+            'top-left': [left, top],
+            'top-right': [right, top],
+            'bottom-left': [left, bottom],
+            'bottom-right': [right, bottom],
+        }[this.config.anchor] ?? [hcenter, top];
+        return {x, y, width: w, height: h};
+    }
+
+    place(window, monitor) {
+        if (window.get_monitor() !== monitor)
+            window.move_to_monitor(monitor);
+        if (this.config.anchor === 'fullscreen') {
+            if (!window.is_fullscreen())
+                window.make_fullscreen();
+            return;
+        }
+        if (window.is_fullscreen())
+            window.unmake_fullscreen();
+        if (window.maximized_horizontally || window.maximized_vertically) {
+            // GNOME 49 replaced unmaximize(flags) by set_unmaximize_flags().
+            if (window.set_unmaximize_flags)
+                window.set_unmaximize_flags(Meta.MaximizeFlags.BOTH);
+            else
+                window.unmaximize(Meta.MaximizeFlags.BOTH);
+        }
+        const area = this.config.respectPanels
+            ? global.workspace_manager.get_active_workspace().get_work_area_for_monitor(monitor)
+            : global.display.get_monitor_geometry(monitor);
+        const rect = this._computeRect(area);
+        window.move_resize_frame(false, rect.x, rect.y, rect.width, rect.height);
+    }
+
+    show(window, timestamp) {
+        const monitor = this.targetMonitor();
+        if (window.minimized)
+            window.unminimize();
+        if (!window.is_on_all_workspaces())
+            window.stick();
+        if (this.config.alwaysOnTop && !window.is_above())
+            window.make_above();
+        else if (!this.config.alwaysOnTop && window.is_above())
+            window.unmake_above();
+        this.place(window, monitor);
+        Main.activateWindow(window, timestamp);
+    }
+
+    release() {
+        const window = this.managed;
+        if (!window)
+            return;
+        if (window.is_on_all_workspaces())
+            window.unstick();
+        if (window.is_above())
+            window.unmake_above();
+    }
+
+    toggle(timestamp) {
+        if (this.launchRequestedAt && Date.now() - this.launchRequestedAt < LAUNCH_TIMEOUT_MS)
+            return; // still waiting for the application to start
+        const window = this.findWindow();
+        if (!window) {
+            this.knownBeforeLaunch = this.windows();
+            this.launchRequestedAt = Date.now();
+            this._controller.callDaemon('LaunchApp', new GLib.Variant('(s)', [this.config.index]));
+            return;
+        }
+        const visible = !window.minimized && window.has_focus() && !Main.overview.visible;
+        if (visible && window.get_monitor() === this.targetMonitor())
+            window.minimize();
+        else
+            this.show(window, timestamp);
+    }
+
+    resetLaunch() {
+        this.launchRequestedAt = 0;
+        this.knownBeforeLaunch = [];
+    }
+
+    // Shortcut
+
+    grab() {
+        const accelerator = this.config.accelerator;
+        const action = global.display.grab_accelerator(accelerator, Meta.KeyBindingFlags.NONE);
+        if (action === Meta.KeyBindingAction.NONE) {
+            return `GNOME refused the hotkey ${accelerator}; it is probably used by another ` +
+                'shortcut. Free it in Settings → Keyboard → Keyboard Shortcuts or pick another one.';
+        }
+        Main.wm.allowKeybinding(Meta.external_binding_name_for_action(action),
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW);
+        this.action = action;
+        return '';
+    }
+
+    ungrab() {
+        if (this.action !== Meta.KeyBindingAction.NONE) {
+            global.display.ungrab_accelerator(this.action);
+            this.action = Meta.KeyBindingAction.NONE;
+        }
+    }
+
+    // Stops managing the window (without giving it back, see release()).
+    destroy() {
+        this.ungrab();
+        this.setManaged(null, false);
+        this.resetLaunch();
+    }
+}
+
 class Controller {
     constructor() {
-        this._config = null;
-        this._action = Meta.KeyBindingAction.NONE;
-        this._managed = null;
-        this._managedUnmanagedId = 0;
-        this._launchRequestedAt = 0;
-        this._knownBeforeLaunch = [];
+        this._apps = [];
         this._pendingShown = new Map();
         this._monitorsTimeoutId = 0;
     }
@@ -58,34 +260,35 @@ class Controller {
 
         this._acceleratorId = global.display.connect('accelerator-activated',
             (display, action, device, timestamp) => {
-                if (action !== Meta.KeyBindingAction.NONE && action === this._action)
-                    this._toggle(timestamp);
+                if (action === Meta.KeyBindingAction.NONE)
+                    return;
+                this._apps.find(app => app.action === action)?.toggle(timestamp);
             });
         this._windowCreatedId = global.display.connect('window-created',
             (display, window) => this._onWindowCreated(window));
         this._monitorsChangedId = Main.layoutManager.connect('monitors-changed',
             () => this._onMonitorsChanged());
 
-        // Give the window back and drop the shortcut if the daemon goes away
-        // without saying goodbye (crash, kill).
+        // Give the windows back and drop the shortcuts if the daemon goes
+        // away without saying goodbye (crash, kill).
         this._watchId = Gio.bus_watch_name(Gio.BusType.SESSION, DAEMON_NAME,
             Gio.BusNameWatcherFlags.NONE, null, () => this._unconfigure());
 
         // After unlocking the screen (extensions are disabled while it is
         // locked) the daemon has to send the configuration again.
-        this._callDaemon('ExtensionReady');
+        this.callDaemon('ExtensionReady');
     }
 
     disable() {
-        // The screen lock disables all extensions; keep the window as it is
-        // in that case, it is picked up again after unlocking.
+        // The screen lock disables all extensions; keep the windows as they
+        // are in that case, they are picked up again after unlocking.
         const locking = Main.sessionMode.isLocked;
-        this._ungrab();
-        if (!locking)
-            this._release();
-        this._config = null;
-        this._setManaged(null, false);
-        this._resetLaunch();
+        for (const app of this._apps) {
+            if (!locking)
+                app.release();
+            app.destroy();
+        }
+        this._apps = [];
 
         for (const [window, id] of this._pendingShown)
             window.disconnect(id);
@@ -110,222 +313,71 @@ class Controller {
     }
 
     Configure(json) {
-        this._config = JSON.parse(json);
-        if (this._managed && !this._matches(this._managed)) {
-            this._release();
-            this._setManaged(null, false);
-        }
-        this._ungrab();
-        return this._grab(this._config.accelerator);
+        const configs = JSON.parse(json).apps ?? [];
+        const old = this._apps;
+        for (const app of old)
+            app.ungrab();
+        this._apps = configs.map((config, i) => {
+            const app = new App(this, config);
+            // Keep the window of an application that is still configured at
+            // the same position; give it back otherwise.
+            const prev = old[i];
+            if (prev?.managed && prev.config.match === config.match)
+                app.setManaged(prev.managed, false);
+            else
+                prev?.release();
+            if (prev && prev.config.match === config.match) {
+                app.launchRequestedAt = prev.launchRequestedAt;
+                app.knownBeforeLaunch = prev.knownBeforeLaunch;
+            }
+            return app;
+        });
+        for (const prev of old.slice(configs.length))
+            prev.release();
+        for (const prev of old)
+            prev.destroy();
+        return this._apps.map(app => app.grab()).filter(warning => warning).join(' ');
     }
 
     Toggle() {
-        this._toggle(global.display.get_current_time_roundtrip());
+        this.ToggleApp(0);
+    }
+
+    ToggleApp(index) {
+        this._apps[index]?.toggle(global.display.get_current_time_roundtrip());
     }
 
     Release() {
         this._unconfigure();
     }
 
-    // Shortcut
-
-    _grab(accelerator) {
-        const action = global.display.grab_accelerator(accelerator, Meta.KeyBindingFlags.NONE);
-        if (action === Meta.KeyBindingAction.NONE) {
-            return `GNOME refused the hotkey ${accelerator}; it is probably used by another ` +
-                'shortcut. Free it in Settings → Keyboard → Keyboard Shortcuts or pick another one.';
-        }
-        Main.wm.allowKeybinding(Meta.external_binding_name_for_action(action),
-            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW);
-        this._action = action;
-        return '';
-    }
-
-    _ungrab() {
-        if (this._action !== Meta.KeyBindingAction.NONE) {
-            global.display.ungrab_accelerator(this._action);
-            this._action = Meta.KeyBindingAction.NONE;
-        }
-    }
-
     _unconfigure() {
-        this._ungrab();
-        this._release();
-        this._setManaged(null, false);
-        this._resetLaunch();
-        this._config = null;
+        for (const app of this._apps) {
+            app.release();
+            app.destroy();
+        }
+        this._apps = [];
+    }
+
+    managedByOther(app, window) {
+        return this._apps.some(other => other !== app && other.managed === window);
     }
 
     // Windows
 
-    _matches(window) {
-        if (!window || window.get_window_type() !== Meta.WindowType.NORMAL)
-            return false;
-        const app = Shell.WindowTracker.get_default().get_window_app(window);
-        const appId = app?.get_id()?.replace(/\.desktop$/, '');
-        const m = this._config.match;
-        return [
-            window.get_wm_class(),
-            window.get_wm_class_instance(),
-            window.get_gtk_application_id(),
-            window.get_sandboxed_app_id(),
-            appId,
-        ].some(v => v && v.toLowerCase() === m);
-    }
-
-    _windows() {
-        return global.get_window_actors()
-            .map(actor => actor.get_meta_window())
-            .filter(window => window && this._matches(window));
-    }
-
-    _setManaged(window, report = true) {
-        if (this._managed && this._managedUnmanagedId)
-            this._managed.disconnect(this._managedUnmanagedId);
-        this._managed = window;
-        this._managedUnmanagedId = 0;
-        if (!window)
-            return;
-        this._managedUnmanagedId = window.connect('unmanaged', () => {
-            if (this._managed === window) {
-                this._managed = null;
-                this._managedUnmanagedId = 0;
-            }
-        });
-        if (report)
-            this._callDaemon('SetManaged', new GLib.Variant('(s)', [String(window.get_id())]));
-    }
-
-    _findWindow() {
-        if (this._managed)
-            return this._managed;
-        const windows = this._windows();
-        let window = null;
-        if (this._config.managedId)
-            window = windows.find(w => String(w.get_id()) === this._config.managedId) ?? null;
-        if (!window && this._config.reuseExisting)
-            window = windows[0] ?? null;
-        if (window)
-            this._setManaged(window);
-        return window;
-    }
-
-    _targetMonitor() {
-        const display = global.display;
-        const monitor = this._config.monitor;
-        if (monitor === 'primary')
-            return display.get_primary_monitor();
-        if (monitor !== 'cursor') {
-            const index = global.backend.get_monitor_manager().get_monitor_for_connector(monitor);
-            if (index >= 0)
-                return index;
-        }
-        return display.get_current_monitor();
-    }
-
-    _computeRect(area) {
-        const pct = v => Math.min(Math.max(v, 1), 100) / 100;
-        const w = Math.max(1, Math.round(area.width * pct(this._config.width)));
-        const h = Math.max(1, Math.round(area.height * pct(this._config.height)));
-        const left = area.x;
-        const right = area.x + area.width - w;
-        const hcenter = area.x + Math.floor((area.width - w) / 2);
-        const top = area.y;
-        const bottom = area.y + area.height - h;
-        const vcenter = area.y + Math.floor((area.height - h) / 2);
-        const [x, y] = {
-            'top': [hcenter, top],
-            'bottom': [hcenter, bottom],
-            'left': [left, vcenter],
-            'right': [right, vcenter],
-            'center': [hcenter, vcenter],
-            'top-left': [left, top],
-            'top-right': [right, top],
-            'bottom-left': [left, bottom],
-            'bottom-right': [right, bottom],
-        }[this._config.anchor] ?? [hcenter, top];
-        return {x, y, width: w, height: h};
-    }
-
-    _place(window, monitor) {
-        if (window.get_monitor() !== monitor)
-            window.move_to_monitor(monitor);
-        if (this._config.anchor === 'fullscreen') {
-            if (!window.is_fullscreen())
-                window.make_fullscreen();
-            return;
-        }
-        if (window.is_fullscreen())
-            window.unmake_fullscreen();
-        if (window.maximized_horizontally || window.maximized_vertically) {
-            // GNOME 49 replaced unmaximize(flags) by set_unmaximize_flags().
-            if (window.set_unmaximize_flags)
-                window.set_unmaximize_flags(Meta.MaximizeFlags.BOTH);
-            else
-                window.unmaximize(Meta.MaximizeFlags.BOTH);
-        }
-        const area = this._config.respectPanels
-            ? global.workspace_manager.get_active_workspace().get_work_area_for_monitor(monitor)
-            : global.display.get_monitor_geometry(monitor);
-        const rect = this._computeRect(area);
-        window.move_resize_frame(false, rect.x, rect.y, rect.width, rect.height);
-    }
-
-    _show(window, timestamp) {
-        const monitor = this._targetMonitor();
-        if (window.minimized)
-            window.unminimize();
-        if (!window.is_on_all_workspaces())
-            window.stick();
-        if (this._config.alwaysOnTop && !window.is_above())
-            window.make_above();
-        else if (!this._config.alwaysOnTop && window.is_above())
-            window.unmake_above();
-        this._place(window, monitor);
-        Main.activateWindow(window, timestamp);
-    }
-
-    _release() {
-        const window = this._managed;
-        if (!window)
-            return;
-        if (window.is_on_all_workspaces())
-            window.unstick();
-        if (window.is_above())
-            window.unmake_above();
-    }
-
-    _toggle(timestamp) {
-        if (!this._config)
-            return;
-        if (this._launchRequestedAt && Date.now() - this._launchRequestedAt < LAUNCH_TIMEOUT_MS)
-            return; // still waiting for the application to start
-        const window = this._findWindow();
-        if (!window) {
-            this._knownBeforeLaunch = this._windows();
-            this._launchRequestedAt = Date.now();
-            this._callDaemon('Launch');
-            return;
-        }
-        const visible = !window.minimized && window.has_focus() && !Main.overview.visible;
-        if (visible && window.get_monitor() === this._targetMonitor())
-            window.minimize();
-        else
-            this._show(window, timestamp);
-    }
-
-    _resetLaunch() {
-        this._launchRequestedAt = 0;
-        this._knownBeforeLaunch = [];
-    }
-
     _onWindowCreated(window) {
-        if (!this._launchRequestedAt)
-            return;
-        if (Date.now() - this._launchRequestedAt > LAUNCH_TIMEOUT_MS) {
-            this._resetLaunch();
-            return;
+        const now = Date.now();
+        let waiting = false;
+        for (const app of this._apps) {
+            if (!app.launchRequestedAt)
+                continue;
+            if (now - app.launchRequestedAt > LAUNCH_TIMEOUT_MS)
+                app.resetLaunch();
+            else
+                waiting = true;
         }
+        if (!waiting)
+            return;
         // On Wayland the app id may only be known once the window is mapped,
         // and placing it before that is overridden by the initial placement.
         const id = window.connect('shown', () => {
@@ -344,13 +396,13 @@ class Controller {
     }
 
     _onLaunchedWindowShown(window) {
-        if (!this._config || !this._launchRequestedAt)
+        const app = this._apps.find(app => app.launchRequestedAt && app.matches(window) &&
+            !app.knownBeforeLaunch.includes(window) && !this.managedByOther(app, window));
+        if (!app)
             return;
-        if (!this._matches(window) || this._knownBeforeLaunch.includes(window))
-            return;
-        this._resetLaunch();
-        this._setManaged(window);
-        this._show(window, global.display.get_current_time_roundtrip());
+        app.resetLaunch();
+        app.setManaged(window);
+        app.show(window, global.display.get_current_time_roundtrip());
     }
 
     _onMonitorsChanged() {
@@ -359,16 +411,18 @@ class Controller {
             GLib.source_remove(this._monitorsTimeoutId);
         this._monitorsTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, MONITORS_CHANGED_DELAY_MS, () => {
             this._monitorsTimeoutId = 0;
-            const window = this._managed;
-            if (this._config && window && !window.minimized) {
-                const monitor = window.get_monitor();
-                this._place(window, monitor >= 0 ? monitor : this._targetMonitor());
+            for (const app of this._apps) {
+                const window = app.managed;
+                if (window && !window.minimized) {
+                    const monitor = window.get_monitor();
+                    app.place(window, monitor >= 0 ? monitor : app.targetMonitor());
+                }
             }
             return GLib.SOURCE_REMOVE;
         });
     }
 
-    _callDaemon(method, params = null) {
+    callDaemon(method, params = null) {
         Gio.DBus.session.call(DAEMON_NAME, DAEMON_PATH, DAEMON_IFACE, method, params, null,
             Gio.DBusCallFlags.NO_AUTO_START, -1, null, (connection, result) => {
                 try {

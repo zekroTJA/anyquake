@@ -1,6 +1,6 @@
 //! The settings window (runs as its own process: `anyquake settings`).
 
-use crate::config::{Config, LogLevel, MonitorChoice, config_path};
+use crate::config::{App, Config, LogLevel, MonitorChoice, config_path};
 use crate::geometry::Anchor;
 use crate::hotkey::{Hotkey, KeyDef, find_key};
 use crate::{autostart, icon, ipc, launch, logging};
@@ -17,8 +17,8 @@ pub fn run() -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("AnyQuake Settings")
             .with_app_id(crate::config::APP_NAME)
-            .with_inner_size([560.0, 640.0])
-            .with_min_inner_size([460.0, 420.0])
+            .with_inner_size([760.0, 640.0])
+            .with_min_inner_size([620.0, 420.0])
             .with_icon(egui::IconData {
                 rgba: icon::rgba(icon_size, icon::Variant::Colored),
                 width: icon_size,
@@ -53,6 +53,15 @@ enum MonitorMode {
     Named,
 }
 
+/// What the content area shows, picked in the sidebar.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    /// Settings of the application with this index.
+    App(usize),
+    /// Settings not tied to an application.
+    Settings,
+}
+
 enum Status {
     Info(String),
     Error(String),
@@ -61,10 +70,12 @@ enum Status {
 struct SettingsApp {
     saved: Config,
     edit: Config,
+    page: Page,
+    /// Screen setting of the selected application.
     monitor_mode: MonitorMode,
     monitor_name: String,
     status: Option<Status>,
-    apps: Vec<apps::DesktopApp>,
+    installed: Vec<apps::DesktopApp>,
     confirm_close: bool,
     allow_close: bool,
     clipboard: Option<Clipboard>,
@@ -76,26 +87,51 @@ impl SettingsApp {
             Ok(config) => (config.unwrap_or_default(), None),
             Err(e) => (Config::default(), Some(Status::Error(format!("{e:#}")))),
         };
-        let (monitor_mode, monitor_name) = match &config.placement.monitor {
-            MonitorChoice::Cursor => (MonitorMode::Cursor, String::new()),
-            MonitorChoice::Primary => (MonitorMode::Primary, String::new()),
-            MonitorChoice::Named(name) => (MonitorMode::Named, name.clone()),
-        };
-        Self {
+        let mut app = Self {
             saved: config.clone(),
             edit: config,
-            monitor_mode,
-            monitor_name,
+            page: Page::App(0),
+            monitor_mode: MonitorMode::Cursor,
+            monitor_name: String::new(),
             status,
-            apps: apps::installed(),
+            installed: apps::installed(),
             confirm_close: false,
             allow_close: false,
             clipboard: None,
+        };
+        app.select(Page::App(0));
+        app
+    }
+
+    /// Switches to `page`. Application indices are clamped to the list.
+    fn select(&mut self, page: Page) {
+        self.page = match page {
+            Page::App(i) => Page::App(i.min(self.edit.apps.len().saturating_sub(1))),
+            Page::Settings => Page::Settings,
+        };
+        let monitor = self
+            .selected_app()
+            .map(|i| &self.edit.apps[i].placement.monitor);
+        (self.monitor_mode, self.monitor_name) = match monitor {
+            None | Some(MonitorChoice::Cursor) => (MonitorMode::Cursor, String::new()),
+            Some(MonitorChoice::Primary) => (MonitorMode::Primary, String::new()),
+            Some(MonitorChoice::Named(name)) => (MonitorMode::Named, name.clone()),
+        };
+    }
+
+    /// Index of the application being edited, if one is.
+    fn selected_app(&self) -> Option<usize> {
+        match self.page {
+            Page::App(i) if i < self.edit.apps.len() => Some(i),
+            _ => None,
         }
     }
 
     fn sync_monitor(&mut self) {
-        self.edit.placement.monitor = match self.monitor_mode {
+        let Some(app) = self.selected_app().map(|i| &mut self.edit.apps[i]) else {
+            return;
+        };
+        app.placement.monitor = match self.monitor_mode {
             MonitorMode::Cursor => MonitorChoice::Cursor,
             MonitorMode::Primary => MonitorChoice::Primary,
             MonitorMode::Named if self.monitor_name.trim().is_empty() => MonitorChoice::Cursor,
@@ -110,6 +146,17 @@ impl SettingsApp {
     /// Writes the config file and asks the daemon to apply it. Returns
     /// `false` if the file could not be written.
     fn save(&mut self) -> bool {
+        if let Some((a, b)) = self.edit.duplicate_hotkey() {
+            let apps = &self.edit.apps;
+            self.status = Some(Status::Error(format!(
+                "\"{}\" and \"{}\" use the same hotkey {}. Pick another one for one of them.",
+                apps[a].label(a),
+                apps[b].label(b),
+                hotkey_label(&apps[a].hotkey)
+            )));
+            self.select(Page::App(b));
+            return false;
+        }
         if let Err(e) = self.edit.save() {
             self.status = Some(Status::Error(format!("Saving failed: {e:#}")));
             return false;
@@ -133,9 +180,88 @@ impl SettingsApp {
         }
     }
 
-    fn target_section(&mut self, ui: &mut egui::Ui) {
+    /// Applications on top, "+ Add application" below them and the settings
+    /// page pinned to the bottom.
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let mut select = None;
+        let entry = |ui: &mut egui::Ui, selected: bool, text: String, right: String| {
+            let size = egui::vec2(ui.available_width(), 28.0);
+            ui.add(
+                egui::Button::selectable(selected, text)
+                    .right_text(egui::RichText::new(right).weak())
+                    .truncate()
+                    .min_size(size),
+            )
+        };
+        ui.add_space(6.0);
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.add_space(6.0);
+            let settings = self.page == Page::Settings;
+            if entry(ui, settings, "Settings".into(), String::new()).clicked() {
+                select = Some(Page::Settings);
+            }
+            ui.separator();
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.weak("Applications");
+                ui.add_space(2.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let selected = self.selected_app();
+                    for (i, app) in self.edit.apps.iter().enumerate() {
+                        let response = entry(
+                            ui,
+                            selected == Some(i),
+                            app.label(i),
+                            hotkey_label(&app.hotkey),
+                        );
+                        if response.clicked() {
+                            select = Some(Page::App(i));
+                        }
+                    }
+                    ui.add_space(4.0);
+                    if ui
+                        .button("+ Add application")
+                        .on_hover_text("Add another application with its own hotkey.")
+                        .clicked()
+                    {
+                        let app = App {
+                            hotkey: self.edit.unused_hotkey(),
+                            ..App::default()
+                        };
+                        self.edit.apps.push(app);
+                        select = Some(Page::App(self.edit.apps.len() - 1));
+                    }
+                });
+            });
+        });
+        if let Some(page) = select {
+            self.select(page);
+        }
+    }
+
+    /// Title of the application page with a button to remove it.
+    fn app_header(&mut self, ui: &mut egui::Ui, index: usize) {
+        let label = self.edit.apps[index].label(index);
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(&label).size(22.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("Remove")
+                    .on_hover_text(format!("Remove \"{label}\" from AnyQuake."))
+                    .clicked()
+                {
+                    self.edit.apps.remove(index);
+                    self.select(Page::App(index));
+                }
+            });
+        });
+    }
+
+    fn target_section(&mut self, ui: &mut egui::Ui, index: usize) {
+        let installed = &self.installed;
+        let app = &mut self.edit.apps[index];
         section(ui, "Application", |ui| {
-            if !self.apps.is_empty() {
+            if !installed.is_empty() {
                 ui.horizontal(|ui| {
                     ui.label("Installed:");
                     egui::ComboBox::from_id_salt("installed-apps")
@@ -143,10 +269,13 @@ impl SettingsApp {
                         .width(ui.available_width())
                         .height(400.0)
                         .show_ui(ui, |ui| {
-                            for app in &self.apps {
-                                if ui.selectable_label(false, &app.name).clicked() {
-                                    self.edit.target.command = app.command.clone();
-                                    self.edit.target.window_match = app.window_match.clone();
+                            for desktop_app in installed {
+                                if ui.selectable_label(false, &desktop_app.name).clicked() {
+                                    app.target.command = desktop_app.command.clone();
+                                    app.target.window_match = desktop_app.window_match.clone();
+                                    if app.name.trim().is_empty() {
+                                        app.name = desktop_app.name.clone();
+                                    }
                                 }
                             }
                         });
@@ -156,29 +285,41 @@ impl SettingsApp {
                 .num_columns(2)
                 .spacing([12.0, 8.0])
                 .show(ui, |ui| {
+                    ui.label("Name:").on_hover_text(
+                        "Shown in the tray menu. Also accepted by `anyquake toggle NAME`.",
+                    );
+                    let hint = App {
+                        name: String::new(),
+                        ..app.clone()
+                    }
+                    .label(index);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.name)
+                            .hint_text(hint)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.end_row();
+
                     ui.label("Command:")
                         .on_hover_text("Started when no window of the application exists yet.");
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.edit.target.command)
+                        egui::TextEdit::singleline(&mut app.target.command)
                             .hint_text("e.g. kitty --class anyquake")
                             .desired_width(f32::INFINITY),
                     );
                     ui.end_row();
 
                     ui.label("Window match:").on_hover_text(match_help());
-                    let hint = format!(
-                        "default: {}",
-                        launch::program_stem(&self.edit.target.command)
-                    );
+                    let hint = format!("default: {}", launch::program_stem(&app.target.command));
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.edit.target.window_match)
+                        egui::TextEdit::singleline(&mut app.target.window_match)
                             .hint_text(hint)
                             .desired_width(f32::INFINITY),
                     );
                     ui.end_row();
                 });
             ui.checkbox(
-                &mut self.edit.target.reuse_existing,
+                &mut app.target.reuse_existing,
                 "Use an already open window of the application",
             )
             .on_hover_text(
@@ -188,9 +329,16 @@ impl SettingsApp {
         });
     }
 
-    fn hotkey_section(&mut self, ui: &mut egui::Ui) {
+    fn hotkey_section(&mut self, ui: &mut egui::Ui, index: usize) {
+        let conflict = self
+            .edit
+            .apps
+            .iter()
+            .enumerate()
+            .find(|&(i, other)| i != index && other.hotkey == self.edit.apps[index].hotkey)
+            .map(|(i, other)| other.label(i));
+        let hotkey = &mut self.edit.apps[index].hotkey;
         section(ui, "Hotkey", |ui| {
-            let hotkey = &mut self.edit.general.hotkey;
             ui.horizontal(|ui| {
                 hotkey_input(ui, hotkey).on_hover_text(
                     "Click and press the desired key combination. \
@@ -205,10 +353,16 @@ impl SettingsApp {
                         ));
                 }
             });
+            if let Some(other) = conflict {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("\"{other}\" uses the same hotkey."),
+                );
+            }
         });
     }
 
-    fn placement_section(&mut self, ui: &mut egui::Ui) {
+    fn placement_section(&mut self, ui: &mut egui::Ui, index: usize) {
         section(ui, "Position", |ui| {
             egui::Grid::new("placement")
                 .num_columns(2)
@@ -257,7 +411,7 @@ impl SettingsApp {
                     });
                     ui.end_row();
 
-                    let p = &mut self.edit.placement;
+                    let p = &mut self.edit.apps[index].placement;
                     ui.label("Position:");
                     egui::ComboBox::from_id_salt("anchor")
                         .selected_text(p.anchor.label())
@@ -282,14 +436,14 @@ impl SettingsApp {
                     );
                     ui.end_row();
                 });
-            let p = &mut self.edit.placement;
+            let p = &mut self.edit.apps[index].placement;
             ui.checkbox(&mut p.respect_panels, "Don't cover panels / taskbar");
             ui.checkbox(&mut p.always_on_top, "Keep above other windows");
         });
     }
 
     fn general_section(&mut self, ui: &mut egui::Ui) {
-        section(ui, "General", |ui| {
+        section(ui, "Settings", |ui| {
             ui.checkbox(
                 &mut self.edit.general.autostart,
                 "Start AnyQuake when I log in",
@@ -446,11 +600,13 @@ impl eframe::App for SettingsApp {
                     .add_enabled(self.dirty(), egui::Button::new("Revert"))
                     .clicked()
                 {
+                    let page = self.page;
                     *self = Self {
                         status: None,
                         clipboard: self.clipboard.take(),
                         ..Self::new()
                     };
+                    self.select(page);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Quit AnyQuake").clicked() {
@@ -471,18 +627,38 @@ impl eframe::App for SettingsApp {
             ui.add_space(4.0);
         });
 
+        egui::Panel::left("sidebar")
+            .resizable(false)
+            .exact_size(190.0)
+            .show(ui, |ui| self.sidebar(ui));
+
         egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                self.target_section(ui);
-                self.hotkey_section(ui);
-                self.placement_section(ui);
-                self.general_section(ui);
-                self.debug_section(ui);
-                ui.add_space(8.0);
-                if let Ok(path) = config_path() {
-                    ui.weak(format!("Configuration: {}", path.display()));
+            egui::ScrollArea::vertical().show(ui, |ui| match (self.page, self.selected_app()) {
+                (Page::App(_), Some(index)) => {
+                    self.app_header(ui, index);
+                    // The application may just have been removed.
+                    if index < self.edit.apps.len() {
+                        self.target_section(ui, index);
+                        self.hotkey_section(ui, index);
+                        self.placement_section(ui, index);
+                    }
                 }
-                ui.weak("Closing this window keeps AnyQuake running in the system tray.");
+                (Page::App(_), None) => {
+                    ui.add_space(12.0);
+                    ui.label(
+                        "No application configured. Add one with \"+ Add application\" in \
+                         the sidebar to show and hide it with a hotkey.",
+                    );
+                }
+                (Page::Settings, _) => {
+                    self.general_section(ui);
+                    self.debug_section(ui);
+                    ui.add_space(8.0);
+                    if let Ok(path) = config_path() {
+                        ui.weak(format!("Configuration: {}", path.display()));
+                    }
+                    ui.weak("Closing this window keeps AnyQuake running in the system tray.");
+                }
             });
         });
 

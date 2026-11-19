@@ -3,7 +3,7 @@
 
 use crate::config::Config;
 use crate::{autostart, launch};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::process::Child;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -16,22 +16,26 @@ pub type Reply = Sender<Result<(), String>>;
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// Show or hide the target window.
-    Toggle,
+    /// Show or hide the window of the application with this index.
+    Toggle(usize),
+    /// Show or hide the window of the application with this (1-based)
+    /// number or name (`anyquake toggle NAME`).
+    ToggleNamed(String, Option<Reply>),
     /// Re-read the configuration file.
     Reload(Option<Reply>),
     /// Open the settings window.
     OpenSettings,
     /// Exit anyquake.
     Quit,
-    /// A backend asks the daemon to start the target application.
-    Launch,
+    /// A backend asks the daemon to start the application with this index.
+    Launch(usize),
     /// The screen layout changed (monitor added/removed, resolution, ...).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     ScreensChanged,
-    /// A backend reports the identity of the managed window (persisted so
-    /// it is found again after a restart).
-    Managed(String),
+    /// A backend reports the identity of the window managed for the
+    /// application with this index (persisted so it is found again after a
+    /// restart).
+    Managed(usize, String),
 }
 
 /// Platform specific window management.
@@ -39,10 +43,11 @@ pub trait Backend {
     fn name(&self) -> &'static str;
 
     /// Applies a (new) configuration. Called on startup and on every reload.
+    /// Applications are referred to by their index in `config.apps`.
     fn configure(&mut self, config: &Config) -> Result<()>;
 
-    /// Shows or hides the target window.
-    fn toggle(&mut self) -> Result<()>;
+    /// Shows or hides the window of application `app`.
+    fn toggle(&mut self, app: usize) -> Result<()>;
 
     /// Re-applies the placement after the screen layout changed.
     fn screens_changed(&mut self) -> Result<()> {
@@ -59,7 +64,7 @@ pub trait Backend {
         Ok(())
     }
 
-    /// Called before anyquake exits: give the window back to the user
+    /// Called before anyquake exits: give the windows back to the user
     /// (visible in the taskbar again etc.).
     fn release(&mut self) {}
 }
@@ -99,7 +104,7 @@ impl Daemon {
         if let Err(e) = autostart::sync(self.config.general.autostart) {
             log::warn!("autostart: {e:#}");
         }
-        if open_settings || first_run || !self.config.target.is_configured() {
+        if open_settings || first_run || !self.config.is_configured() {
             self.open_settings();
         }
     }
@@ -108,14 +113,16 @@ impl Daemon {
     pub fn handle(&mut self, event: Event) -> bool {
         log::debug!("event: {event:?}");
         let result = match event {
-            Event::Toggle => {
-                if self.config.target.is_configured() {
-                    self.backend.toggle()
-                } else {
-                    log::warn!("no target application configured");
-                    self.open_settings();
-                    Ok(())
+            Event::Toggle(app) => self.toggle(app),
+            Event::ToggleNamed(selector, reply) => {
+                let result = match self.config.find_app(&selector) {
+                    Some(app) => self.toggle(app),
+                    None => Err(anyhow!("no application '{selector}' configured")),
+                };
+                if let Some(reply) = reply {
+                    let _ = reply.send(result.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
                 }
+                result
             }
             Event::Reload(reply) => {
                 let result = self.reload();
@@ -128,10 +135,16 @@ impl Daemon {
                 self.open_settings();
                 Ok(())
             }
-            Event::Launch => launch::spawn_detached(&self.config.target.command),
+            Event::Launch(app) => match self.config.apps.get(app) {
+                Some(app) => launch::spawn_detached(&app.target.command),
+                None => Ok(()),
+            },
             Event::ScreensChanged => self.backend.screens_changed(),
-            Event::Managed(id) => {
-                crate::state::save_managed_window(self.backend.name(), &id);
+            Event::Managed(app, id) => {
+                if let Some(config) = self.config.apps.get(app) {
+                    let matcher = config.target.effective_match();
+                    crate::state::save_managed_window(self.backend.name(), app, &matcher, &id);
+                }
                 Ok(())
             }
             Event::Quit => {
@@ -147,6 +160,27 @@ impl Daemon {
             log::error!("{e:#}");
         }
         true
+    }
+
+    /// Names of the configured applications, for the tray menu.
+    pub fn app_labels(&self) -> Vec<String> {
+        let apps = self.config.apps.iter().enumerate();
+        apps.map(|(i, app)| app.label(i)).collect()
+    }
+
+    fn toggle(&mut self, app: usize) -> Result<()> {
+        if self
+            .config
+            .apps
+            .get(app)
+            .is_some_and(|app| app.target.is_configured())
+        {
+            self.backend.toggle(app)
+        } else {
+            log::warn!("application {} is not configured", app + 1);
+            self.open_settings();
+            Ok(())
+        }
     }
 
     pub fn poll_interval(&self) -> Option<Duration> {

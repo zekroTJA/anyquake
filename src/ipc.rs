@@ -61,9 +61,17 @@ pub fn send(command: &str) -> Result<bool> {
 /// Translates a command into an event and waits for the result where the
 /// daemon reports one.
 fn handle_command(line: &str, emit: &impl Fn(Event)) -> Result<(), String> {
-    let event = match line.trim() {
+    let line = line.trim();
+    if let Some(selector) = line.strip_prefix("toggle ") {
+        let (tx, rx) = std::sync::mpsc::channel();
+        emit(Event::ToggleNamed(selector.trim().to_owned(), Some(tx)));
+        return rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| "no answer from daemon".to_owned())?;
+    }
+    let event = match line {
         "ping" => return Ok(()),
-        "toggle" => Event::Toggle,
+        "toggle" => Event::Toggle(0),
         "settings" => Event::OpenSettings,
         "quit" => Event::Quit,
         "reload" => {
