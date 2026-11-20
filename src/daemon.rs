@@ -34,6 +34,11 @@ pub enum Event {
     OpenSettings,
     /// Exit anyquake.
     Quit,
+    /// The settings window asks for the connected screens.
+    QueryScreens(ScreensReply),
+    /// The compositor side (KWin script) reports the connected screens.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    ScreensReported(Vec<ScreenInfo>),
     /// A backend asks the daemon to start the application with this index.
     Launch(usize),
     /// A backend reports what toggling the application with this index did
@@ -48,6 +53,19 @@ pub enum Event {
     Managed(usize, String),
 }
 
+/// A connected screen, as listed in the settings window.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScreenInfo {
+    /// The name used in the configuration (`MonitorChoice::Named`).
+    pub name: String,
+    pub width: i32,
+    pub height: i32,
+    pub primary: bool,
+}
+
+/// Receives the connected screens (for the settings window).
+pub type ScreensReply = Sender<Result<Vec<ScreenInfo>, String>>;
+
 /// Platform specific window management.
 pub trait Backend {
     fn name(&self) -> &'static str;
@@ -58,6 +76,13 @@ pub trait Backend {
 
     /// Shows or hides the window of application `app`.
     fn toggle(&mut self, app: usize) -> Result<()>;
+
+    /// The connected screens, named like the configuration expects them.
+    /// `None` if the backend can't query them directly (see
+    /// [`Event::ScreensReported`]).
+    fn screens(&mut self) -> Result<Option<Vec<ScreenInfo>>> {
+        Ok(None)
+    }
 
     /// Re-applies the placement after the screen layout changed.
     fn screens_changed(&mut self) -> Result<()> {
@@ -88,6 +113,9 @@ pub struct Daemon {
     /// were started and whether the process already failed (and that was
     /// logged).
     launches: HashMap<usize, (Instant, Arc<AtomicBool>)>,
+    /// Screens last reported by the compositor side, for backends that
+    /// can't query them (KWin).
+    reported_screens: Option<Vec<ScreenInfo>>,
 }
 
 impl Daemon {
@@ -98,6 +126,7 @@ impl Daemon {
             config: Config::default(),
             settings: Arc::default(),
             launches: HashMap::new(),
+            reported_screens: None,
         }
     }
 
@@ -162,6 +191,23 @@ impl Daemon {
                 Ok(())
             }
             Event::ScreensChanged => self.backend.screens_changed(),
+            Event::QueryScreens(reply) => {
+                let screens = match self.backend.screens() {
+                    Ok(Some(screens)) => Ok(screens),
+                    Ok(None) => self
+                        .reported_screens
+                        .clone()
+                        .ok_or_else(|| "the screens are not known yet".to_owned()),
+                    Err(e) => Err(format!("{e:#}")),
+                };
+                let _ = reply.send(screens);
+                Ok(())
+            }
+            Event::ScreensReported(screens) => {
+                log::debug!("screens: {screens:?}");
+                self.reported_screens = Some(screens);
+                Ok(())
+            }
             Event::Managed(app, id) => {
                 if self.launches.remove(&app).is_some()
                     && let Some(config) = self.config.apps.get(app)

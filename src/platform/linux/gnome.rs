@@ -11,7 +11,7 @@
 //! to log out and back in once.
 
 use crate::config::Config;
-use crate::daemon::{Backend, Event};
+use crate::daemon::{Backend, Event, ScreenInfo};
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 use std::collections::HashMap;
@@ -324,6 +324,47 @@ impl Backend for Gnome {
             hotkeys.join(", ")
         );
         Ok(())
+    }
+
+    /// Active monitors from mutter's DisplayConfig interface, named by
+    /// connector like the extension expects them.
+    fn screens(&mut self) -> Result<Option<Vec<ScreenInfo>>> {
+        type Props = HashMap<String, OwnedValue>;
+        type MonitorId = (String, String, String, String);
+        type Mode = (String, i32, i32, f64, f64, Vec<f64>, Props);
+        type Monitor = (MonitorId, Vec<Mode>, Props);
+        type Logical = (i32, i32, f64, u32, bool, Vec<MonitorId>, Props);
+        let (_serial, monitors, logical, _props): (u32, Vec<Monitor>, Vec<Logical>, Props) = self
+            .call(
+                "org.gnome.Mutter.DisplayConfig",
+                "/org/gnome/Mutter/DisplayConfig",
+                "org.gnome.Mutter.DisplayConfig",
+                "GetCurrentState",
+                &(),
+            )?
+            .body()
+            .deserialize()?;
+        let mut screens = Vec::new();
+        for (id, modes, _) in monitors {
+            // Monitors without a logical monitor are turned off.
+            let Some(&(.., primary, _, _)) = logical.iter().find(|l| l.5.contains(&id)) else {
+                continue;
+            };
+            let current = modes.iter().find(|mode| {
+                mode.6
+                    .get("is-current")
+                    .and_then(|v| bool::try_from(v).ok())
+                    .unwrap_or(false)
+            });
+            let (width, height) = current.map(|m| (m.1, m.2)).unwrap_or_default();
+            screens.push(ScreenInfo {
+                name: id.0,
+                width,
+                height,
+                primary,
+            });
+        }
+        Ok(Some(screens))
     }
 
     fn toggle(&mut self, app: usize) -> Result<()> {

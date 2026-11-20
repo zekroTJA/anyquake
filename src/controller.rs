@@ -3,7 +3,7 @@
 //! logic inside a KWin script).
 
 use crate::config::{Config, MonitorChoice, Placement};
-use crate::daemon::{Backend, Event, LAUNCH_TIMEOUT};
+use crate::daemon::{Backend, Event, LAUNCH_TIMEOUT, ScreenInfo};
 use crate::geometry::{self, Anchor, Rect};
 use anyhow::Result;
 use std::collections::HashSet;
@@ -366,6 +366,21 @@ impl<O: WindowOps> Backend for Controller<O> {
         }
         self.report(app, "showing");
         self.show(app, window)
+    }
+
+    fn screens(&mut self) -> Result<Option<Vec<ScreenInfo>>> {
+        let monitors = self.ops.monitors()?;
+        Ok(Some(
+            monitors
+                .into_iter()
+                .map(|m| ScreenInfo {
+                    name: m.name,
+                    width: m.full.w,
+                    height: m.full.h,
+                    primary: m.primary,
+                })
+                .collect(),
+        ))
     }
 
     fn screens_changed(&mut self) -> Result<()> {

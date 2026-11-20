@@ -53,6 +53,18 @@ impl DaemonCallbacks {
         }
     }
 
+    /// Reports the connected screens as a JSON array of
+    /// [`crate::daemon::ScreenInfo`] (KWin scripts can only pass simple
+    /// values).
+    fn set_screens(&self, screens: String) {
+        match serde_json::from_str(&screens) {
+            Ok(screens) => {
+                let _ = self.events.send(Event::ScreensReported(screens));
+            }
+            Err(e) => log::warn!("unexpected screen list '{screens}': {e}"),
+        }
+    }
+
     /// [`Self::launch_app`] for the first application. Used by the GNOME
     /// Shell extension of AnyQuake 0.5 until the next login.
     fn launch(&self) {

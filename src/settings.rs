@@ -1,6 +1,7 @@
 //! The settings window (runs as its own process: `anyquake settings`).
 
 use crate::config::{App, Config, LogLevel, MonitorChoice, config_path};
+use crate::daemon::ScreenInfo;
 use crate::geometry::Anchor;
 use crate::hotkey::{Hotkey, KeyDef, find_key};
 use crate::{autostart, icon, ipc, launch, logging};
@@ -74,6 +75,9 @@ struct SettingsApp {
     /// Screen setting of the selected application.
     monitor_mode: MonitorMode,
     monitor_name: String,
+    /// Connected screens as reported by the daemon. `None` if it isn't
+    /// running or can't list them; the screen name is typed in then.
+    screens: Option<Vec<ScreenInfo>>,
     status: Option<Status>,
     installed: Vec<apps::DesktopApp>,
     confirm_close: bool,
@@ -93,6 +97,7 @@ impl SettingsApp {
             page: Page::App(0),
             monitor_mode: MonitorMode::Cursor,
             monitor_name: String::new(),
+            screens: query_screens(),
             status,
             installed: apps::installed(),
             confirm_close: false,
@@ -385,25 +390,51 @@ impl SettingsApp {
                                 "Primary screen",
                             )
                             .changed();
-                        ui.horizontal(|ui| {
-                            changed |= ui
-                                .radio_value(
+                        ui.horizontal(|ui| match &self.screens {
+                            Some(screens) => {
+                                let named = ui.radio_value(
                                     &mut self.monitor_mode,
                                     MonitorMode::Named,
-                                    "Screen named",
-                                )
-                                .changed();
-                            let edit = ui.add_enabled(
-                                self.monitor_mode == MonitorMode::Named,
-                                egui::TextEdit::singleline(&mut self.monitor_name)
-                                    .hint_text("e.g. DP-2")
-                                    .desired_width(120.0),
-                            );
-                            changed |= edit.changed();
-                            edit.on_hover_text(
-                                "Connector / display name. Falls back to the cursor screen if the \
-                             screen is not connected.",
-                            );
+                                    "Specific screen",
+                                );
+                                if named.changed() {
+                                    changed = true;
+                                    // Preselect a screen so the choice is
+                                    // complete.
+                                    if self.monitor_name.trim().is_empty()
+                                        && let Some(first) = screens.first()
+                                    {
+                                        self.monitor_name = first.name.clone();
+                                    }
+                                }
+                                let picked = ui
+                                    .add_enabled_ui(self.monitor_mode == MonitorMode::Named, |ui| {
+                                        screen_picker(ui, screens, &mut self.monitor_name)
+                                    })
+                                    .inner;
+                                changed |= picked;
+                            }
+                            None => {
+                                changed |= ui
+                                    .radio_value(
+                                        &mut self.monitor_mode,
+                                        MonitorMode::Named,
+                                        "Screen named",
+                                    )
+                                    .changed();
+                                let edit = ui.add_enabled(
+                                    self.monitor_mode == MonitorMode::Named,
+                                    egui::TextEdit::singleline(&mut self.monitor_name)
+                                        .hint_text("e.g. DP-2")
+                                        .desired_width(120.0),
+                                );
+                                changed |= edit.changed();
+                                edit.on_hover_text(
+                                    "Connector / display name. Falls back to the cursor screen \
+                                     if the screen is not connected. AnyQuake lists the \
+                                     connected screens here while it is running.",
+                                );
+                            }
                         });
                         if changed {
                             self.sync_monitor();
@@ -664,6 +695,67 @@ impl eframe::App for SettingsApp {
 
         self.close_dialog(&ctx);
     }
+}
+
+/// The connected screens from the running daemon, if it can list them.
+fn query_screens() -> Option<Vec<ScreenInfo>> {
+    match ipc::screens() {
+        Ok(Some(screens)) if !screens.is_empty() => Some(screens),
+        Ok(_) => None,
+        Err(e) => {
+            log::debug!("listing screens: {e:#}");
+            None
+        }
+    }
+}
+
+fn screen_label(screen: &ScreenInfo) -> String {
+    let mut label = screen.name.clone();
+    if screen.width > 0 && screen.height > 0 {
+        label.push_str(&format!(" · {}×{}", screen.width, screen.height));
+    }
+    if screen.primary {
+        label.push_str(" (primary)");
+    }
+    label
+}
+
+/// Dropdown of the connected screens. A configured screen that is not
+/// connected stays selectable. Returns whether the selection changed.
+fn screen_picker(ui: &mut egui::Ui, screens: &[ScreenInfo], name: &mut String) -> bool {
+    let current = name.trim().to_owned();
+    let connected = screens
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case(&current));
+    let selected_text = match connected {
+        Some(screen) => screen_label(screen),
+        None if current.is_empty() => "Pick a screen…".to_owned(),
+        None => format!("{current} (not connected)"),
+    };
+    let mut changed = false;
+    egui::ComboBox::from_id_salt("screen")
+        .selected_text(selected_text)
+        .width(220.0)
+        .show_ui(ui, |ui| {
+            for screen in screens {
+                let selected = connected.is_some_and(|c| c.name == screen.name);
+                if ui
+                    .selectable_label(selected, screen_label(screen))
+                    .clicked()
+                {
+                    *name = screen.name.clone();
+                    changed = true;
+                }
+            }
+            if connected.is_none() && !current.is_empty() {
+                let _ = ui.selectable_label(true, format!("{current} (not connected)"));
+            }
+        })
+        .response
+        .on_hover_text(
+            "Falls back to the screen with the mouse cursor if this screen is not connected.",
+        );
+    changed
 }
 
 /// `file://` URL of an absolute path (`file:///C:/...` on Windows).

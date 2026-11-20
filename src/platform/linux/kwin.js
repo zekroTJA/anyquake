@@ -230,7 +230,16 @@ function screensChanged() {
     }
 }
 
+// Tells the daemon which screens exist (listed in the settings window).
+function reportScreens() {
+    const screens = workspace.screens.map(function (s, i) {
+        return { name: s.name, width: s.geometry.width, height: s.geometry.height, primary: i === 0 };
+    });
+    callDBus(DBUS_SERVICE, DBUS_PATH, DBUS_IFACE, "SetScreens", JSON.stringify(screens));
+}
+
 workspace.screensChanged.connect(screensChanged);
+workspace.screensChanged.connect(reportScreens);
 workspace.virtualScreenGeometryChanged.connect(screensChanged);
 
 for (const app of apps) {
@@ -239,3 +248,4 @@ for (const app of apps) {
     });
 }
 registerShortcut(CONFIG.releaseShortcutName, CONFIG.releaseShortcutText, "", release);
+reportScreens();
