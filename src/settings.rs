@@ -269,21 +269,23 @@ impl SettingsApp {
             if !installed.is_empty() {
                 ui.horizontal(|ui| {
                     ui.label("Installed:");
-                    egui::ComboBox::from_id_salt("installed-apps")
-                        .selected_text("Pick an application…")
-                        .width(ui.available_width())
-                        .height(400.0)
-                        .show_ui(ui, |ui| {
-                            for desktop_app in installed {
-                                if ui.selectable_label(false, &desktop_app.name).clicked() {
-                                    app.target.command = desktop_app.command.clone();
-                                    app.target.window_match = desktop_app.window_match.clone();
-                                    if app.name.trim().is_empty() {
-                                        app.name = desktop_app.name.clone();
-                                    }
-                                }
-                            }
-                        });
+                    let names: Vec<_> = installed.iter().map(|a| a.name.as_str()).collect();
+                    let width = ui.available_width();
+                    let (_, picked) = searchable_combo(
+                        ui,
+                        "installed-apps",
+                        "Pick an application…",
+                        width,
+                        &names,
+                        None,
+                    );
+                    if let Some(desktop_app) = picked.map(|i| &installed[i]) {
+                        app.target.command = desktop_app.command.clone();
+                        app.target.window_match = desktop_app.window_match.clone();
+                        if app.name.trim().is_empty() {
+                            app.name = desktop_app.name.clone();
+                        }
+                    }
                 });
             }
             egui::Grid::new("target")
@@ -444,13 +446,13 @@ impl SettingsApp {
 
                     let p = &mut self.edit.apps[index].placement;
                     ui.label("Position:");
-                    egui::ComboBox::from_id_salt("anchor")
-                        .selected_text(p.anchor.label())
-                        .show_ui(ui, |ui| {
-                            for anchor in Anchor::ALL {
-                                ui.selectable_value(&mut p.anchor, anchor, anchor.label());
-                            }
-                        });
+                    let labels = Anchor::ALL.map(Anchor::label);
+                    let selected = Anchor::ALL.iter().position(|&a| a == p.anchor);
+                    let (_, picked) =
+                        searchable_combo(ui, "anchor", p.anchor.label(), 160.0, &labels, selected);
+                    if let Some(i) = picked {
+                        p.anchor = Anchor::ALL[i];
+                    }
                     ui.end_row();
 
                     let sized = p.anchor != Anchor::Fullscreen;
@@ -493,18 +495,23 @@ impl SettingsApp {
             ui.add_enabled_ui(debug.log_file, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Log level:");
-                    egui::ComboBox::from_id_salt("log-level")
-                        .selected_text(debug.log_level.label())
-                        .show_ui(ui, |ui| {
-                            for level in LogLevel::ALL {
-                                ui.selectable_value(&mut debug.log_level, level, level.label());
-                            }
-                        })
-                        .response
-                        .on_hover_text(
-                            "Most detailed messages written to the file. Messages of \
-                             libraries are only included from warnings on.",
-                        );
+                    let labels = LogLevel::ALL.map(LogLevel::label);
+                    let selected = LogLevel::ALL.iter().position(|&l| l == debug.log_level);
+                    let (response, picked) = searchable_combo(
+                        ui,
+                        "log-level",
+                        debug.log_level.label(),
+                        160.0,
+                        &labels,
+                        selected,
+                    );
+                    response.on_hover_text(
+                        "Most detailed messages written to the file. Messages of \
+                         libraries are only included from warnings on.",
+                    );
+                    if let Some(i) = picked {
+                        debug.log_level = LogLevel::ALL[i];
+                    }
                 });
             });
             if let Some(path) = logging::path() {
@@ -726,36 +733,142 @@ fn screen_picker(ui: &mut egui::Ui, screens: &[ScreenInfo], name: &mut String) -
     let current = name.trim().to_owned();
     let connected = screens
         .iter()
-        .find(|s| s.name.eq_ignore_ascii_case(&current));
+        .position(|s| s.name.eq_ignore_ascii_case(&current));
     let selected_text = match connected {
-        Some(screen) => screen_label(screen),
+        Some(i) => screen_label(&screens[i]),
         None if current.is_empty() => "Pick a screen…".to_owned(),
         None => format!("{current} (not connected)"),
     };
-    let mut changed = false;
-    egui::ComboBox::from_id_salt("screen")
+    let labels: Vec<_> = screens.iter().map(screen_label).collect();
+    let labels: Vec<_> = labels.iter().map(String::as_str).collect();
+    let (response, picked) =
+        searchable_combo(ui, "screen", selected_text, 220.0, &labels, connected);
+    response.on_hover_text(
+        "Falls back to the screen with the mouse cursor if this screen is not connected.",
+    );
+    match picked {
+        Some(i) => {
+            *name = screens[i].name.clone();
+            true
+        }
+        None => false,
+    }
+}
+
+/// Search state of an open [`searchable_combo`].
+#[derive(Clone, Default)]
+struct ComboSearch {
+    query: String,
+    /// Position of the highlighted item among the matching ones.
+    highlight: usize,
+    /// Up / Down was used, so the highlight is shown even without a query.
+    navigated: bool,
+}
+
+/// Whether `item` contains every word of `query` (case-insensitively).
+fn matches_query(item: &str, query: &str) -> bool {
+    let item = item.to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|word| item.contains(word))
+}
+
+/// A dropdown whose items can be filtered by typing: the search field is
+/// focused when it opens, Up / Down move the highlight and Enter picks the
+/// highlighted item. Returns the dropdown button's response and the index
+/// of the picked item.
+fn searchable_combo(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    selected_text: impl Into<egui::WidgetText>,
+    width: f32,
+    items: &[&str],
+    selected: Option<usize>,
+) -> (egui::Response, Option<usize>) {
+    let state_id = ui.make_persistent_id(("combo-search", id_salt));
+    let mut picked = None;
+    let combo = egui::ComboBox::from_id_salt(id_salt)
         .selected_text(selected_text)
-        .width(220.0)
+        .width(width)
+        // Room for the search field above the list's own scroll area, so
+        // the field never scrolls away.
+        .height(420.0)
+        // Clicks into the search field must not close the dropdown.
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show_ui(ui, |ui| {
-            for screen in screens {
-                let selected = connected.is_some_and(|c| c.name == screen.name);
-                if ui
-                    .selectable_label(selected, screen_label(screen))
-                    .clicked()
-                {
-                    *name = screen.name.clone();
-                    changed = true;
-                }
+            let stored = ui.data(|d| d.get_temp::<ComboSearch>(state_id));
+            let opened = stored.is_none();
+            let mut state = stored.unwrap_or_default();
+
+            // Consumed before the search field sees them.
+            let (down, up) = ui.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                )
+            });
+            let search = ui.add(
+                egui::TextEdit::singleline(&mut state.query)
+                    .hint_text("Search…")
+                    .desired_width(f32::INFINITY),
+            );
+            if opened {
+                search.request_focus();
             }
-            if connected.is_none() && !current.is_empty() {
-                let _ = ui.selectable_label(true, format!("{current} (not connected)"));
+            if search.changed() {
+                state.highlight = 0;
             }
-        })
-        .response
-        .on_hover_text(
-            "Falls back to the screen with the mouse cursor if this screen is not connected.",
-        );
-    changed
+            let enter = search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.separator();
+
+            let matching: Vec<usize> = (0..items.len())
+                .filter(|&i| matches_query(items[i], &state.query))
+                .collect();
+            if down || up {
+                state.navigated = true;
+            }
+            if down {
+                state.highlight += 1;
+            }
+            if up {
+                state.highlight = state.highlight.saturating_sub(1);
+            }
+            state.highlight = state.highlight.min(matching.len().saturating_sub(1));
+            let show_highlight = state.navigated || !state.query.trim().is_empty();
+
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    for (n, &i) in matching.iter().enumerate() {
+                        let mut response = ui.selectable_label(selected == Some(i), items[i]);
+                        if show_highlight && n == state.highlight {
+                            response = response.highlight();
+                            if down || up {
+                                response.scroll_to_me(None);
+                            }
+                        }
+                        if response.clicked() {
+                            picked = Some(i);
+                        }
+                    }
+                    if matching.is_empty() {
+                        ui.weak("No matches");
+                    }
+                });
+            if enter {
+                picked = picked.or(matching.get(state.highlight).copied());
+            }
+            if picked.is_some() {
+                ui.close();
+            }
+            ui.data_mut(|d| d.insert_temp(state_id, state));
+        });
+    // Start with an empty search the next time it opens.
+    if combo.inner.is_none() || picked.is_some() {
+        ui.data_mut(|d| d.remove::<ComboSearch>(state_id));
+    }
+    (combo.response, picked)
 }
 
 /// `file://` URL of an absolute path (`file:///C:/...` on Windows).
@@ -964,6 +1077,20 @@ fn match_help() -> &'static str {
         "Bundle identifier (e.g. com.apple.Terminal) or name of the application."
     } else {
         "Window class / Wayland app id (e.g. org.kde.konsole). Compared case-insensitively."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_query;
+
+    #[test]
+    fn search_matches_all_words() {
+        assert!(matches_query("Visual Studio Code", ""));
+        assert!(matches_query("Visual Studio Code", "code"));
+        assert!(matches_query("Visual Studio Code", "  STUDIO vis "));
+        assert!(!matches_query("Visual Studio Code", "studio x"));
+        assert!(matches_query("DP-2 · 2560×1440 (primary)", "dp-2"));
     }
 }
 
