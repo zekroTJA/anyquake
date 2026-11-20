@@ -12,6 +12,13 @@ https://github.com/user-attachments/assets/9135b890-df7e-4e91-b3d0-323217619496
   
 </details>
 
+<details>
+  <summary>Windows</summary>
+
+https://github.com/user-attachments/assets/a84ee63a-7649-4c4d-8444-f0299c4175c1
+
+</details>
+
 > [!IMPORTANT]
 > This project is mostly vibe coded, but code changes are reviewed and tested by a human (me). Also the logo is 100% human made.
 
