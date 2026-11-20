@@ -3,7 +3,14 @@
 Show and hide **any** application window with a global hotkey - quake-console
 style - on _any_[\*](#platform-support) platform!
 
-![](assets/screenshot.png)
+https://github.com/user-attachments/assets/ab17f4dd-f46d-4353-afc3-5d0d8f3c9ec9
+
+<details>
+  <summary>macOS</summary>
+  
+https://github.com/user-attachments/assets/9135b890-df7e-4e91-b3d0-323217619496
+  
+</details>
 
 > [!IMPORTANT]
 > This project is mostly vibe coded, but code changes are reviewed and tested by a human (me). Also the logo is 100% human made.
